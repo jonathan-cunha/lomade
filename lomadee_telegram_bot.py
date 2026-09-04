@@ -1,15 +1,5 @@
 """
-Bot de ofertas: Lomadee API -> Telegram
-
-Correções desta versão:
-1. Agora filtra por palavras-chave (celular, suplementos, TV, etc.) antes de
-   postar - antes o robo pegava QUALQUER produto do catalogo, sem filtro,
-   por isso apareciam coisas sem relacao nenhuma com o canal.
-2. Nao divide mais o preco por 100 automaticamente. A versao anterior
-   assumia que a API manda valores "em centavos", o que gerava precos
-   errados (ex: R$ 199,90 virava R$ 1,99). Agora o valor e usado como a
-   API manda, e o modo de teste (DEBUG=1) mostra os valores brutos para
-   você confirmar que estao corretos antes de ligar o robo de verdade.
+Bot de ofertas: Lomadee API -> Telegram (Multilojas e Todos os Produtos)
 """
 
 import json
@@ -28,57 +18,9 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 DEBUG = os.environ.get("DEBUG") == "1"
 
-# Se a Lomadee realmente manda os precos em centavos (ex: 19990 = R$ 199,90),
-# mude isto para "1". Deixe "0" ate confirmar o formato certo rodando com DEBUG=1.
-PRECO_EM_CENTAVOS = os.environ.get("PRECO_EM_CENTAVOS", "0") == "1"
-
-# Palavras-chave que definem o que o robo pode postar. Um produto so passa
-# se o nome dele contiver pelo menos uma dessas palavras (sem acento,
-# sem diferenciar maiusculas/minusculas). Ajuste essa lista a vontade.
-PALAVRAS_CHAVE = [
-    # Celulares e eletronicos
-    "celular", "smartphone", "iphone", "galaxy", "xiaomi", "motorola",
-    "fone de ouvido", "fone bluetooth", "carregador", "power bank",
-    "notebook", "tablet", "smartwatch",
-    # TV e video game
-    "tv", "televisao", "smart tv", "video game", "playstation", "xbox",
-    "nintendo", "controle de video game",
-    # Suplementos e academia
-    "suplemento", "whey", "creatina", "bcaa", "pre treino", "albumina",
-    "barra de proteina",
-    # Roupas e calcados
-    "camiseta", "camisa", "calça", "vestido", "jaqueta", "tenis",
-    "sapato", "sandalia", "bolsa",
-    # Eletrodomesticos
-    "geladeira", "fogao", "microondas", "air fryer", "liquidificador",
-    "aspirador de po", "ventilador", "ar condicionado", "maquina de lavar",
-    # Itens para carro
-    "som automotivo", "pneu", "bateria automotiva", "acessorio para carro",
-    "capa de banco", "tapete automotivo",
-]
-
-PRODUCT_SEARCH_PARAMS = {
-    "limit": 100,
-    "isAvailable": True,
-}
-
 POSTADOS_PATH = "postados.json"
 
-# Respeitar o limite de 10 pedidos por minuto da API da Lomadee
-PAUSA_ENTRE_PEDIDOS_API = 6.5  # segundos
-
 # ======================================================================
-
-
-def normalizar(texto: str) -> str:
-    """Remove acentos e deixa em minusculas, para comparar palavras-chave."""
-    substituicoes = str.maketrans("áàâãéêíóôõúüç", "aaaaeeiooouuc")
-    return (texto or "").lower().translate(substituicoes)
-
-
-def produto_interessa(nome_produto: str) -> bool:
-    nome_normalizado = normalizar(nome_produto)
-    return any(normalizar(palavra) in nome_normalizado for palavra in PALAVRAS_CHAVE)
 
 
 def carregar_postados():
@@ -97,36 +39,48 @@ def salvar_postados(postados):
 
 
 def buscar_produtos():
+    """
+    Busca produtos de todas as lojas parceiras navegando pelas páginas da API da Lomadee.
+    """
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
     headers = {"x-api-key": LOMADEE_API_KEY}
     produtos = []
     page = 1
+    max_pages = 10  # Ajuste o limite de páginas por execução se quiser mais ofertas
 
-    while True:
-        params = dict(PRODUCT_SEARCH_PARAMS)
-        params["page"] = page
+    while page <= max_pages:
+        params = {
+            "page": page,
+            "limit": 100,
+            "isAvailable": True,
+        }
 
-        resp = requests.get(url, headers=headers, params=params, timeout=45)
-        resp.raise_for_status()
-        data = resp.json()
-        pagina = data.get("data", []) or []
-        produtos.extend(pagina)
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=45)
+            if not resp.ok:
+                print(f"[API LOMADEE] Erro ao buscar página {page}: {resp.status_code}")
+                break
 
-        meta = data.get("meta", {}) or {}
-        total_pages = int(meta.get("totalPages") or page)
-        if page >= total_pages or not pagina:
+            data = resp.json()
+            pagina = data.get("data", []) or []
+            produtos.extend(pagina)
+
+            meta = data.get("meta", {}) or {}
+            total_pages = int(meta.get("totalPages") or page)
+
+            if page >= total_pages or not pagina:
+                break
+            page += 1
+        except Exception as e:
+            print(f"[API LOMADEE] Exceção ao buscar produtos: {e}")
             break
-        page += 1
-        time.sleep(PAUSA_ENTRE_PEDIDOS_API)
 
     return produtos
 
 
-def encurtar_url(url_original, organization_id, feature_id=None):
+def encurtar_url(url_original, organization_id):
     """
-    POST /affiliate/shortener/url
-    Se houver erro (como domain_not_allowed ou rate-limit),
-    retorna a URL original como fallback para nao travar o envio.
+    Tenta encurtar e gerar o link de afiliado. Caso ocorra erro, usa a URL original.
     """
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
@@ -139,46 +93,36 @@ def encurtar_url(url_original, organization_id, feature_id=None):
         "organizationId": int(organization_id) if str(organization_id).isdigit() else organization_id,
         "type": "Custom"
     }
-    if feature_id:
-        payload["featureId"] = feature_id
 
     try:
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
-
-        if not resp.ok:
-            print(f"[ENCURTADOR] Falhou ({resp.status_code}) - Usando URL original de fallback.")
-            return url_original
-
-        data = resp.json()
-
-        if isinstance(data, dict):
-            if "shortUrl" in data and data["shortUrl"]:
-                return data["shortUrl"]
-            if "url" in data and data["url"]:
-                return data["url"]
-            if isinstance(data.get("type"), list) and data["type"]:
-                item = data["type"][0]
-                if isinstance(item, dict):
-                    short_urls = item.get("shortUrls")
-                    if isinstance(short_urls, list) and short_urls:
-                        return short_urls[0]
-
-        if isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                canais = item.get("availableChannels") or []
-                if isinstance(canais, list):
-                    for canal in canais:
-                        if not isinstance(canal, dict):
-                            continue
-                        short_urls = canal.get("shortUrls")
-                        if isinstance(short_urls, list) and short_urls:
-                            return short_urls[0]
-    except Exception as e:
-        print(f"[ENCURTADOR] Exceção capturada: {e} - Usando URL original.")
+        if resp.ok:
+            data = resp.json()
+            if isinstance(data, dict):
+                if data.get("shortUrl"):
+                    return data["shortUrl"]
+                if data.get("url"):
+                    return data["url"]
+    except Exception:
+        pass
 
     return url_original
+
+
+def normalizar_preco(valor):
+    """
+    Trata valores inteiros ou decimais vindos da API (ajusta se vier em centavos).
+    """
+    if valor is None:
+        return None
+    try:
+        val = float(valor)
+        # Se o valor for muito alto (ex: 159900 para R$ 1.599,00), converte de centavos para reais
+        if val > 10000 and val % 1 == 0:
+            val = val / 100
+        return val
+    except (ValueError, TypeError):
+        return None
 
 
 def extrair_dados_produto(produto):
@@ -207,8 +151,8 @@ def extrair_dados_produto(produto):
         "id": produto.get("id") or produto.get("productId"),
         "organization_id": produto.get("organizationId"),
         "nome": produto.get("name") or produto.get("title", "Produto"),
-        "preco": preco,
-        "preco_original": preco_original,
+        "preco": normalizar_preco(preco),
+        "preco_original": normalizar_preco(preco_original),
         "url": link_produto,
         "imagem": imagem or produto.get("image") or produto.get("imageUrl"),
     }
@@ -218,28 +162,18 @@ def formatar_mensagem(p):
     preco_atual = p.get("preco")
     preco_original = p.get("preco_original")
 
-    if PRECO_EM_CENTAVOS:
-        if isinstance(preco_atual, (int, float)):
-            preco_atual = preco_atual / 100
-        if isinstance(preco_original, (int, float)):
-            preco_original = preco_original / 100
-
     linhas = [f"🔥 *{p['nome']}*"]
 
-    if (
-        isinstance(preco_original, (int, float))
-        and isinstance(preco_atual, (int, float))
-        and preco_original > preco_atual
-    ):
+    if preco_original and preco_atual and preco_original > preco_atual:
         desconto_pct = round((1 - preco_atual / preco_original) * 100)
         linhas.append(
             f"~De R$ {preco_original:.2f}~ por *R$ {preco_atual:.2f}* "
             f"({desconto_pct}% OFF)"
         )
-    elif isinstance(preco_atual, (int, float)):
+    elif preco_atual:
         linhas.append(f"Por *R$ {preco_atual:.2f}*")
 
-    linhas.append(f"👉 {p['link_afiliado']}")
+    linhas.append(f"\n👉 {p['link_afiliado']}")
     return "\n".join(linhas)
 
 
@@ -262,80 +196,47 @@ def enviar_telegram(texto, imagem_url=None):
 
     resp = requests.post(endpoint, json=payload, timeout=30)
     if not resp.ok:
-        motivo = resp.text
-        try:
-            motivo_json = resp.json()
-            motivo = motivo_json.get("description") or resp.text
-        except Exception:
-            pass
-        print(f"[TELEGRAM] Falhou ({resp.status_code}): {motivo}")
+        print(f"[TELEGRAM] Erro ao enviar ({resp.status_code}): {resp.text}")
     return resp.ok
 
 
 def rodar_uma_vez():
     postados = carregar_postados()
     produtos = buscar_produtos()
-    print(f"[debug] {len(produtos)} produtos recebidos da Lomadee (antes do filtro)")
-
-    relevantes = [p for p in produtos if produto_interessa(
-        p.get("name") or p.get("title") or ""
-    )]
-    print(f"[debug] {len(relevantes)} produtos combinam com as palavras-chave configuradas")
 
     if DEBUG:
-        for produto_bruto in relevantes[:3]:
-            p = extrair_dados_produto(produto_bruto)
-            print(json.dumps({
-                "nome": p["nome"],
-                "preco_bruto_da_api": p["preco"],
-                "preco_original_bruto_da_api": p["preco_original"],
-            }, indent=2, ensure_ascii=False))
-        print("[debug] Modo DEBUG ativo - nada foi postado no Telegram. "
-              "Confira se os valores de preco acima batem com o preco real do produto "
-              "(pesquise o nome do produto no Google pra comparar).")
+        print(json.dumps(produtos[:2], indent=2, ensure_ascii=False))
         return
 
     novos = 0
     falhas_telegram = 0
-    pulados_campo_faltando = 0
-    pulados_ja_postado = 0
     marcas = set()
-    for produto_bruto in relevantes:
+
+    for produto_bruto in produtos:
         p = extrair_dados_produto(produto_bruto)
 
-        if not p["id"] or not p["url"] or not p["organization_id"]:
-            pulados_campo_faltando += 1
-            print(f"[debug] pulado por falta de campo -> id={p['id']!r} "
-                  f"url={p['url']!r} organization_id={p['organization_id']!r} "
-                  f"nome={p['nome']!r}")
+        # Validações essenciais
+        if not p["id"] or not p["url"] or not p["organization_id"] or not p["preco"]:
             continue
         if p["id"] in postados:
-            pulados_ja_postado += 1
             continue
 
-        p["link_afiliado"] = encurtar_url(
-            p["url"],
-            p["organization_id"],
-        )
-        time.sleep(PAUSA_ENTRE_PEDIDOS_API)
-
+        p["link_afiliado"] = encurtar_url(p["url"], p["organization_id"])
         marcas.add(str(p["organization_id"]))
         mensagem = formatar_mensagem(p)
 
         if enviar_telegram(mensagem, imagem_url=p["imagem"]):
             postados.add(p["id"])
             novos += 1
-            print(f"[POSTADO] {p['nome']}")
+            print(f"[POSTADO] {p['nome']} - R$ {p['preco']:.2f}")
             time.sleep(2)
         else:
             falhas_telegram += 1
 
     salvar_postados(postados)
     print(
-        f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas. "
-        f"{falhas_telegram} falharam ao enviar pro Telegram. "
-        f"{pulados_campo_faltando} pulados por falta de dados. "
-        f"{pulados_ja_postado} pulados por ja terem sido postados antes."
+        f"Concluído. {novos} ofertas novas postadas de {len(marcas)} lojas/marcas diferentes. "
+        f"{falhas_telegram} falhas."
     )
 
 
