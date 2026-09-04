@@ -1,12 +1,5 @@
 """
 Bot de ofertas: Lomadee API -> Telegram
-
-O que este script faz:
-  1. Busca produtos/ofertas na API da Lomadee (GET /affiliate/products)
-  2. Gera o link de afiliado encurtado (POST /affiliate/shortener/url) com fallback
-  3. Formata uma mensagem com preco, desconto e link
-  4. Posta no seu canal/grupo do Telegram via Bot API
-  5. Guarda os IDs ja postados num arquivo local para nao repetir ofertas
 """
 
 import json
@@ -52,10 +45,6 @@ def salvar_postados(postados):
 
 
 def buscar_produtos():
-    """
-    GET /affiliate/products - busca produtos de todas as marcas às quais
-    a conta tem acesso.
-    """
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
     headers = {"x-api-key": LOMADEE_API_KEY}
     produtos = []
@@ -83,46 +72,33 @@ def buscar_produtos():
 def encurtar_url(url_original, organization_id, feature_id=None):
     """
     POST /affiliate/shortener/url
-    Tenta encurtar o link. Caso retorne 400 ou falhe, retorna a URL original como fallback.
+    Envia a URL usando o campo 'link' exigido pela API da Lomadee.
     """
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
         "Content-Type": "application/json",
         "x-api-key": LOMADEE_API_KEY,
     }
+    
+    # A API da Lomadee aceita 'link' no payload
     payload = {
-        "url": url_original,
+        "link": url_original,
         "organizationId": int(organization_id) if str(organization_id).isdigit() else organization_id,
         "type": "custom"
     }
     if feature_id:
         payload["featureId"] = feature_id
 
-    try:
-        resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
-        
-        # Se retornar erro 400 ou outro erro da API, captura sem interromper
-        if resp.status_code != 200 and resp.status_code != 201:
-            return url_original
+    resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
+    
+    if not resp.ok:
+        print(f"Erro no encurtador ({resp.status_code}): {resp.text}")
+        return url_original
 
-        data = resp.json()
+    data = resp.json()
 
-        # Tratamento flexivel da resposta JSON
-        if isinstance(data, dict):
-            if "shortUrl" in data and data["shortUrl"]:
-                return data["shortUrl"]
-            if "url" in data and data["url"]:
-                return data["url"]
-            if isinstance(data.get("type"), list) and data["type"]:
-                item = data["type"][0]
-                if isinstance(item, dict):
-                    short_urls = item.get("shortUrls")
-                    if isinstance(short_urls, list) and short_urls:
-                        return short_urls[0]
-                    return item.get("shortUrl") or url_original
-
-    except Exception:
-        pass
+    if isinstance(data, dict):
+        return data.get("shortUrl") or data.get("url") or data.get("link") or url_original
 
     return url_original
 
@@ -147,7 +123,6 @@ def extrair_dados_produto(produto):
     if isinstance(imagens, list) and imagens:
         imagem = (imagens[0] or {}).get("url")
 
-    # Tenta usar diretamente a URL tratada do produto caso o encurtador falhe
     link_produto = produto.get("link") or produto.get("url") or produto.get("productUrl")
 
     return {
@@ -230,7 +205,6 @@ def rodar_uma_vez():
         if p["id"] in postados:
             continue
 
-        # Encurta ou usa a URL original caso a API do encurtador recuse (Fallback)
         p["link_afiliado"] = encurtar_url(
             p["url"],
             p["organization_id"],
@@ -243,7 +217,7 @@ def rodar_uma_vez():
             postados.add(p["id"])
             novos += 1
             print(f"Postado: {p['nome']}")
-            time.sleep(2)  # evita rate limit do Telegram
+            time.sleep(2)
 
     salvar_postados(postados)
     print(f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas.")
