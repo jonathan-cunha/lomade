@@ -71,12 +71,8 @@ def buscar_produtos():
 def encurtar_url(url_original, organization_id, feature_id=None):
     """
     POST /affiliate/shortener/url
-    Ajustado estritamente para as exigências do schema da Lomadee.
-
-    Retorna o link encurtado (link de afiliado) quando a API responde certo.
-    Retorna None quando não foi possível gerar o link de afiliado, para que
-    quem chamar essa função decida pular o produto em vez de postar um link
-    sem rastreamento de comissão.
+    Se houver erro (como domain_not_allowed ou rate-limit),
+    retorna a URL original como fallback para nao travar o envio.
     """
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
@@ -84,7 +80,6 @@ def encurtar_url(url_original, organization_id, feature_id=None):
         "x-api-key": LOMADEE_API_KEY,
     }
     
-    # Campo 'url' e 'type' com Capital Case ("Custom")
     payload = {
         "url": url_original,
         "organizationId": int(organization_id) if str(organization_id).isdigit() else organization_id,
@@ -93,54 +88,43 @@ def encurtar_url(url_original, organization_id, feature_id=None):
     if feature_id:
         payload["featureId"] = feature_id
 
-    resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
-    
-    if not resp.ok:
-        motivo = resp.text
-        try:
-            motivo_json = resp.json()
-            motivo = motivo_json.get("message") or motivo_json.get("code") or resp.text
-        except Exception:
-            pass
-        print(
-            f"[ENCURTADOR] Falhou ({resp.status_code}) para organizationId={organization_id}: "
-            f"{motivo}"
-        )
-        return None
+    try:
+        resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
+        
+        if not resp.ok:
+            print(f"[ENCURTADOR] Falhou ({resp.status_code}) - Usando URL original de fallback.")
+            return url_original
 
-    data = resp.json()
+        data = resp.json()
 
-    # Formato mais comum retornado pela API: dict direto com shortUrl/url
-    if isinstance(data, dict):
-        if "shortUrl" in data and data["shortUrl"]:
-            return data["shortUrl"]
-        if "url" in data and data["url"]:
-            return data["url"]
-        if isinstance(data.get("type"), list) and data["type"]:
-            item = data["type"][0]
-            if isinstance(item, dict):
-                short_urls = item.get("shortUrls")
-                if isinstance(short_urls, list) and short_urls:
-                    return short_urls[0]
-
-    # Formato observado na prática: lista na raiz, com o link dentro de
-    # availableChannels -> shortUrls
-    # Ex: [{"name": "Garimpo Digital", "availableChannels": [{"name": "GarimpoMedia", "shortUrls": ["https://leiaia.link/xxxxx"]}]}]
-    if isinstance(data, list):
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            canais = item.get("availableChannels") or []
-            if isinstance(canais, list):
-                for canal in canais:
-                    if not isinstance(canal, dict):
-                        continue
-                    short_urls = canal.get("shortUrls")
+        if isinstance(data, dict):
+            if "shortUrl" in data and data["shortUrl"]:
+                return data["shortUrl"]
+            if "url" in data and data["url"]:
+                return data["url"]
+            if isinstance(data.get("type"), list) and data["type"]:
+                item = data["type"][0]
+                if isinstance(item, dict):
+                    short_urls = item.get("shortUrls")
                     if isinstance(short_urls, list) and short_urls:
                         return short_urls[0]
 
-    print(f"[ENCURTADOR] Resposta OK mas sem shortUrl reconhecível para organizationId={organization_id}: {data}")
-    return None
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                canais = item.get("availableChannels") or []
+                if isinstance(canais, list):
+                    for canal in canais:
+                        if not isinstance(canal, dict):
+                            continue
+                        short_urls = canal.get("shortUrls")
+                        if isinstance(short_urls, list) and short_urls:
+                            return short_urls[0]
+    except Exception as e:
+        print(f"[ENCURTADOR] Exceção capturada: {e} - Usando URL original.")
+
+    return url_original
 
 
 def extrair_dados_produto(produto):
@@ -242,7 +226,6 @@ def rodar_uma_vez():
         return
 
     novos = 0
-    pulados_sem_link = 0
     falhas_telegram = 0
     marcas = set()
     for produto_bruto in produtos:
@@ -253,19 +236,11 @@ def rodar_uma_vez():
         if p["id"] in postados:
             continue
 
-        link_afiliado = encurtar_url(
+        p["link_afiliado"] = encurtar_url(
             p["url"],
             p["organization_id"],
         )
 
-        if not link_afiliado:
-            # Não gera comissão sem o link de afiliado, então pula o produto
-            # em vez de postar o link original.
-            pulados_sem_link += 1
-            print(f"[PULADO] Sem link de afiliado válido: {p['nome']}")
-            continue
-
-        p["link_afiliado"] = link_afiliado
         marcas.add(str(p["organization_id"]))
         mensagem = formatar_mensagem(p)
 
@@ -280,7 +255,6 @@ def rodar_uma_vez():
     salvar_postados(postados)
     print(
         f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas. "
-        f"{pulados_sem_link} puladas por falta de link de afiliado. "
         f"{falhas_telegram} falharam ao enviar pro Telegram."
     )
 
