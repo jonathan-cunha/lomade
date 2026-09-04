@@ -1,0 +1,42 @@
+name: Postar ofertas no Telegram
+
+on:
+  schedule:
+    # Roda a cada 30 minutos. Ajuste o cron como quiser:
+    # https://crontab.guru para montar a expressao.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}   # permite rodar manualmente pelo botao "Run workflow"
+
+permissions:
+  contents: write   # necessario pra commitar o postados.json de volta
+
+jobs:
+  postar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Rodar o bot
+        env:
+          LOMADEE_API_KEY: ${{ secrets.LOMADEE_API_KEY }}
+          LOMADEE_ORGANIZATION_ID: ${{ secrets.LOMADEE_ORGANIZATION_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python lomadee_telegram_bot.py
+
+      - name: Salvar progresso (postados.json)
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add postados.json
+          git diff --cached --quiet || git commit -m "Atualiza ofertas postadas [skip ci]"
+          git push
