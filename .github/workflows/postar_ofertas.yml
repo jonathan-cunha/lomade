@@ -1,41 +1,41 @@
-name: Postar ofertas no Telegram
+name: Bot Lomadee Telegram
 
 on:
+  workflow_dispatch:
   schedule:
-    # Roda a cada 30 minutos. Ajuste o cron como quiser:
-    # https://crontab.guru para montar a expressao.
-    - cron: "*/30 * * * *"
-  workflow_dispatch: {}   # permite rodar manualmente pelo botao "Run workflow"
-
-permissions:
-  contents: write   # necessario pra commitar o postados.json de volta
+    - cron: '*/30 * * * *' # Executa a cada 30 minutos
 
 jobs:
-  postar:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout do repositorio
-        uses: actions/checkout@v4
+      - name: Baixar o repositorio
+        uses: actions/checkout@v3
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.10'
 
       - name: Instalar dependencias
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Rodar o bot
         env:
           LOMADEE_API_KEY: ${{ secrets.LOMADEE_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_USERNAME: ${{ secrets.CHANNEL_USERNAME }}
+          LOMADEE_SOURCE_ID: ${{ secrets.LOMADEE_SOURCE_ID }}
         run: python lomadee_telegram_bot.py
 
       - name: Salvar progresso (postados.json)
+        if: always()
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add postados.json
-          git diff --cached --quiet || git commit -m "Atualiza ofertas postadas [skip ci]"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add postados.json || git add posted_ids.json || exit 0
+          git commit -m "Atualiza historico de postados [skip ci]" || exit 0
           git push
