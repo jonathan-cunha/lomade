@@ -28,7 +28,6 @@ jobs:
       - name: Rodar o bot
         env:
           LOMADEE_API_KEY: ${{ secrets.LOMADEE_API_KEY }}
-          LOMADEE_ORGANIZATION_ID: ${{ secrets.LOMADEE_ORGANIZATION_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python lomadee_telegram_bot.py
