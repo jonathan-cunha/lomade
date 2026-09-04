@@ -1,0 +1,196 @@
+"""
+Bot de ofertas: Lomadee API -> Telegram
+
+O que este script faz:
+  1. Busca produtos/ofertas na API da Lomadee (GET /affiliate/products)
+  2. Gera o link de afiliado encurtado (POST /affiliate/shortener/url)
+  3. Formata uma mensagem com preco, desconto e link
+  4. Posta no seu canal/grupo do Telegram via Bot API
+  5. Guarda os IDs ja postados num arquivo local para nao repetir ofertas
+
+Este script roda UMA EXECUCAO e termina (busca ofertas novas, posta,
+salva o progresso). O agendamento (rodar a cada X minutos/horas) fica
+por conta de um agendador externo -- veja o workflow do GitHub Actions
+(.github/workflows/postar_ofertas.yml) que roda este script sozinho,
+na nuvem, sem precisar do seu computador ligado.
+
+Todas as credenciais vem de variaveis de ambiente (nunca deixe chave
+escrita direto no codigo se for subir pra um repositorio no GitHub,
+mesmo que privado).
+
+IMPORTANTE: os nomes exatos dos campos retornados por /affiliate/products
+podem variar um pouco (id, name/title, price, discountPrice, url, image...).
+Rode primeiro localmente com a variavel DEBUG=1 pra ver o JSON real e
+ajustar a funcao `extrair_dados_produto` se necessario -- deixei ela
+isolada exatamente pra isso ser facil de adaptar.
+"""
+
+import json
+import os
+import sys
+import time
+import requests
+
+# ============================== CONFIG ==============================
+# Todas essas variaveis vem do ambiente. No GitHub Actions elas sao
+# preenchidas a partir dos "Secrets" do repositorio (veja o README).
+
+LOMADEE_API_KEY = os.environ["LOMADEE_API_KEY"]
+LOMADEE_BASE_URL = os.environ.get("LOMADEE_BASE_URL", "https://api.lomadee.com.br")
+ORGANIZATION_ID = os.environ["LOMADEE_ORGANIZATION_ID"]
+
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+DEBUG = os.environ.get("DEBUG") == "1"
+
+# Filtros de busca de produtos (ajuste como quiser)
+PRODUCT_SEARCH_PARAMS = {
+    "page": 1,
+    "limit": 20,
+    # "keyword": "notebook",
+    # "minPrice": 0,
+    # "maxPrice": 2000,
+}
+
+POSTADOS_PATH = "postados.json"
+
+# ======================================================================
+
+
+def carregar_postados():
+    if os.path.exists(POSTADOS_PATH):
+        with open(POSTADOS_PATH, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+
+def salvar_postados(postados):
+    with open(POSTADOS_PATH, "w", encoding="utf-8") as f:
+        json.dump(list(postados), f)
+
+
+def buscar_produtos():
+    """GET /affiliate/products - retorna a lista bruta de produtos da Lomadee."""
+    url = f"{LOMADEE_BASE_URL}/affiliate/products"
+    headers = {"x-api-key": LOMADEE_API_KEY}
+    resp = requests.get(url, headers=headers, params=PRODUCT_SEARCH_PARAMS, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("data", [])
+
+
+def encurtar_url(url_original, feature_id=None, tipo="Custom"):
+    """POST /affiliate/shortener/url - gera o link de afiliado encurtado."""
+    endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": LOMADEE_API_KEY,
+    }
+    payload = {
+        "url": url_original,
+        "organizationId": ORGANIZATION_ID,
+        "type": tipo,  # "Custom", "Offer", "Coupon" ou "BrandPage"
+    }
+    if feature_id:
+        payload["featureId"] = feature_id
+
+    resp = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        return data["type"][0]["shortUrls"][0]
+    except (KeyError, IndexError):
+        # Se o shortener falhar por algum motivo, cai pro link original
+        return url_original
+
+
+def extrair_dados_produto(produto):
+    """
+    Isola a leitura dos campos do produto num unico lugar.
+    Ajuste as chaves aqui se o JSON real vier com nomes diferentes
+    (rode em modo DEBUG pra conferir).
+    """
+    return {
+        "id": produto.get("id") or produto.get("productId"),
+        "nome": produto.get("name") or produto.get("title", "Produto"),
+        "preco": produto.get("price"),
+        "preco_desconto": produto.get("discountPrice") or produto.get("salePrice"),
+        "url": produto.get("url") or produto.get("productUrl"),
+        "imagem": produto.get("image") or produto.get("imageUrl"),
+    }
+
+
+def formatar_mensagem(p):
+    preco_atual = p["preco_desconto"] or p["preco"]
+    linhas = [f"🔥 *{p['nome']}*"]
+
+    if p["preco"] and p["preco_desconto"] and p["preco_desconto"] < p["preco"]:
+        desconto_pct = round((1 - p["preco_desconto"] / p["preco"]) * 100)
+        linhas.append(f"~De R$ {p['preco']:.2f}~ por *R$ {preco_atual:.2f}* ({desconto_pct}% OFF)")
+    elif preco_atual:
+        linhas.append(f"Por *R$ {preco_atual:.2f}*")
+
+    linhas.append(f"👉 {p['link_afiliado']}")
+    return "\n".join(linhas)
+
+
+def enviar_telegram(texto, imagem_url=None):
+    if imagem_url:
+        endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "photo": imagem_url,
+            "caption": texto,
+            "parse_mode": "Markdown",
+        }
+    else:
+        endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": texto,
+            "parse_mode": "Markdown",
+        }
+
+    resp = requests.post(endpoint, json=payload, timeout=30)
+    if not resp.ok:
+        print(f"Erro ao enviar pro Telegram: {resp.status_code} - {resp.text}")
+    return resp.ok
+
+
+def rodar_uma_vez():
+    postados = carregar_postados()
+    produtos = buscar_produtos()
+
+    if DEBUG:
+        print(json.dumps(produtos[:1], indent=2, ensure_ascii=False))
+        return
+
+    novos = 0
+    for produto_bruto in produtos:
+        p = extrair_dados_produto(produto_bruto)
+
+        if not p["id"] or not p["url"]:
+            continue
+        if p["id"] in postados:
+            continue
+
+        p["link_afiliado"] = encurtar_url(p["url"])
+        mensagem = formatar_mensagem(p)
+
+        if enviar_telegram(mensagem, imagem_url=p["imagem"]):
+            postados.add(p["id"])
+            novos += 1
+            print(f"Postado: {p['nome']}")
+            time.sleep(2)  # evita rate limit do Telegram
+
+    salvar_postados(postados)
+    print(f"Concluido. {novos} ofertas novas postadas.")
+
+
+if __name__ == "__main__":
+    try:
+        rodar_uma_vez()
+    except Exception as e:
+        print(f"Erro na execucao: {e}")
+        sys.exit(1)
