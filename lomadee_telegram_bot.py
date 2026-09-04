@@ -1,12 +1,5 @@
 """
 Bot de ofertas: Lomadee API -> Telegram
-
-O que este script faz:
-  1. Busca produtos/ofertas na API da Lomadee (GET /affiliate/products)
-  2. Gera o link de afiliado encurtado (POST /affiliate/shortener/url)
-  3. Formata uma mensagem com preco, desconto e link
-  4. Posta no seu canal/grupo do Telegram via Bot API
-  5. Guarda os IDs ja postados num arquivo local para nao repetir ofertas
 """
 
 import json
@@ -16,8 +9,6 @@ import time
 import requests
 
 # ============================== CONFIG ==============================
-# Todas essas variaveis vem do ambiente. No GitHub Actions elas sao
-# preenchidas a partir dos "Secrets" do repositorio.
 
 LOMADEE_API_KEY = os.environ["LOMADEE_API_KEY"]
 LOMADEE_BASE_URL = os.environ.get("LOMADEE_BASE_URL", "https://api-beta.lomadee.com.br")
@@ -54,10 +45,6 @@ def salvar_postados(postados):
 
 
 def buscar_produtos():
-    """
-    GET /affiliate/products - busca produtos de todas as marcas às quais
-    a conta tem acesso.
-    """
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
     headers = {"x-api-key": LOMADEE_API_KEY}
     produtos = []
@@ -83,7 +70,10 @@ def buscar_produtos():
 
 
 def encurtar_url(url_original, organization_id, feature_id=None, tipo="custom"):
-    """POST /affiliate/shortener/url - gera o link de afiliado encurtado com tratamento de erros."""
+    """
+    POST /affiliate/shortener/url
+    Envia payload completo com domains e tipo correto para evitar erro 400.
+    """
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
         "Content-Type": "application/json",
@@ -92,7 +82,8 @@ def encurtar_url(url_original, organization_id, feature_id=None, tipo="custom"):
     payload = {
         "url": url_original,
         "organizationId": organization_id,
-        "type": tipo.lower(),  # "custom", "offer", "coupon" ou "brandpage"
+        "type": tipo.lower(),
+        "domains": [1]  # ID padrao do dominio de encurtador da Lomadee
     }
     if feature_id:
         payload["featureId"] = feature_id
@@ -101,7 +92,7 @@ def encurtar_url(url_original, organization_id, feature_id=None, tipo="custom"):
     resp.raise_for_status()
     data = resp.json()
 
-    # Tratamento seguro da resposta do JSON
+    # Leitura segura da resposta da API
     if isinstance(data, dict):
         if "shortUrl" in data and data["shortUrl"]:
             return data["shortUrl"]
@@ -119,13 +110,9 @@ def encurtar_url(url_original, organization_id, feature_id=None, tipo="custom"):
 
 
 def extrair_dados_produto(produto):
-    """
-    Isola a leitura dos campos do produto num único lugar.
-    """
     preco = produto.get("price")
     preco_original = produto.get("listPrice") or produto.get("originalPrice")
 
-    # Na API atual, os preços ficam normalmente dentro de options[].pricing[].
     options = produto.get("options") or []
     if isinstance(options, list):
         for option in options:
@@ -157,7 +144,6 @@ def formatar_mensagem(p):
     preco_atual = p.get("preco")
     preco_original = p.get("preco_original")
 
-    # A API retorna preços em centavos.
     if isinstance(preco_atual, (int, float)):
         preco_atual = preco_atual / 100
     if isinstance(preco_original, (int, float)):
@@ -223,6 +209,9 @@ def rodar_uma_vez():
         if p["id"] in postados:
             continue
 
+        # Pequena pausa entre cada tentativa de encurtamento para evitar o erro 429
+        time.sleep(1)
+
         try:
             p["link_afiliado"] = encurtar_url(
                 p["url"],
@@ -230,6 +219,9 @@ def rodar_uma_vez():
             )
         except requests.HTTPError as e:
             print(f"Erro ao gerar link afiliado para {p['nome']}: {e}")
+            if e.response is not None and e.response.status_code == 429:
+                print("Rate limit atingido (429). Aguardando 10 segundos...")
+                time.sleep(10)
             continue
         except Exception as e:
             print(f"Erro inesperado ao encurtar link para {p['nome']}: {e}")
