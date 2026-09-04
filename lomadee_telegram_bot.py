@@ -7,22 +7,6 @@ O que este script faz:
   3. Formata uma mensagem com preco, desconto e link
   4. Posta no seu canal/grupo do Telegram via Bot API
   5. Guarda os IDs ja postados num arquivo local para nao repetir ofertas
-
-Este script roda UMA EXECUCAO e termina (busca ofertas novas, posta,
-salva o progresso). O agendamento (rodar a cada X minutos/horas) fica
-por conta de um agendador externo -- veja o workflow do GitHub Actions
-(.github/workflows/postar_ofertas.yml) que roda este script sozinho,
-na nuvem, sem precisar do seu computador ligado.
-
-Todas as credenciais vem de variaveis de ambiente (nunca deixe chave
-escrita direto no codigo se for subir pra um repositorio no GitHub,
-mesmo que privado).
-
-IMPORTANTE: os nomes exatos dos campos retornados por /affiliate/products
-podem variar um pouco (id, name/title, price, discountPrice, url, image...).
-Rode primeiro localmente com a variavel DEBUG=1 pra ver o JSON real e
-ajustar a funcao `extrair_dados_produto` se necessario -- deixei ela
-isolada exatamente pra isso ser facil de adaptar.
 """
 
 import json
@@ -33,7 +17,7 @@ import requests
 
 # ============================== CONFIG ==============================
 # Todas essas variaveis vem do ambiente. No GitHub Actions elas sao
-# preenchidas a partir dos "Secrets" do repositorio (veja o README).
+# preenchidas a partir dos "Secrets" do repositorio.
 
 LOMADEE_API_KEY = os.environ["LOMADEE_API_KEY"]
 LOMADEE_BASE_URL = os.environ.get("LOMADEE_BASE_URL", "https://api-beta.lomadee.com.br")
@@ -43,12 +27,10 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 DEBUG = os.environ.get("DEBUG") == "1"
 
-# Filtros de busca de produtos (ajuste como quiser)
+# Filtros de busca de produtos
 PRODUCT_SEARCH_PARAMS = {
     "limit": 100,
     "isAvailable": True,
-    # "search": "notebook",
-    # "price": "0:200000",  # valores em centavos
 }
 
 POSTADOS_PATH = "postados.json"
@@ -58,8 +40,11 @@ POSTADOS_PATH = "postados.json"
 
 def carregar_postados():
     if os.path.exists(POSTADOS_PATH):
-        with open(POSTADOS_PATH, "r", encoding="utf-8") as f:
-            return set(json.load(f))
+        try:
+            with open(POSTADOS_PATH, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
     return set()
 
 
@@ -71,8 +56,7 @@ def salvar_postados(postados):
 def buscar_produtos():
     """
     GET /affiliate/products - busca produtos de todas as marcas às quais
-    a conta tem acesso. A própria resposta de cada produto informa o
-    organizationId da marca.
+    a conta tem acesso.
     """
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
     headers = {"x-api-key": LOMADEE_API_KEY}
@@ -98,8 +82,8 @@ def buscar_produtos():
     return produtos
 
 
-def encurtar_url(url_original, organization_id, feature_id=None, tipo="Custom"):
-    """POST /affiliate/shortener/url - gera o link de afiliado encurtado."""
+def encurtar_url(url_original, organization_id, feature_id=None, tipo="custom"):
+    """POST /affiliate/shortener/url - gera o link de afiliado encurtado com tratamento de erros."""
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
         "Content-Type": "application/json",
@@ -108,7 +92,7 @@ def encurtar_url(url_original, organization_id, feature_id=None, tipo="Custom"):
     payload = {
         "url": url_original,
         "organizationId": organization_id,
-        "type": tipo,  # "Custom", "Offer", "Coupon" ou "BrandPage"
+        "type": tipo.lower(),  # "custom", "offer", "coupon" ou "brandpage"
     }
     if feature_id:
         payload["featureId"] = feature_id
@@ -116,18 +100,27 @@ def encurtar_url(url_original, organization_id, feature_id=None, tipo="Custom"):
     resp = requests.post(endpoint, headers=headers, json=payload, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    try:
-        return data["type"][0]["shortUrls"][0]
-    except (KeyError, IndexError):
-        # Se o shortener falhar por algum motivo, cai pro link original
-        return url_original
+
+    # Tratamento seguro da resposta do JSON
+    if isinstance(data, dict):
+        if "shortUrl" in data and data["shortUrl"]:
+            return data["shortUrl"]
+        if "url" in data and data["url"]:
+            return data["url"]
+        if isinstance(data.get("type"), list) and data["type"]:
+            item = data["type"][0]
+            if isinstance(item, dict):
+                short_urls = item.get("shortUrls")
+                if isinstance(short_urls, list) and short_urls:
+                    return short_urls[0]
+                return item.get("shortUrl") or url_original
+
+    return url_original
 
 
 def extrair_dados_produto(produto):
     """
-    Isola a leitura dos campos do produto num unico lugar.
-    Ajuste as chaves aqui se o JSON real vier com nomes diferentes
-    (rode em modo DEBUG pra conferir).
+    Isola a leitura dos campos do produto num único lugar.
     """
     preco = produto.get("price")
     preco_original = produto.get("listPrice") or produto.get("originalPrice")
@@ -238,6 +231,10 @@ def rodar_uma_vez():
         except requests.HTTPError as e:
             print(f"Erro ao gerar link afiliado para {p['nome']}: {e}")
             continue
+        except Exception as e:
+            print(f"Erro inesperado ao encurtar link para {p['nome']}: {e}")
+            continue
+
         marcas.add(str(p["organization_id"]))
         mensagem = formatar_mensagem(p)
 
@@ -248,12 +245,12 @@ def rodar_uma_vez():
             time.sleep(2)  # evita rate limit do Telegram
 
     salvar_postados(postados)
-    print(f"Concluido. {novos} ofertas novas postadas de {len(marcas)} marcas.")
+    print(f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas.")
 
 
 if __name__ == "__main__":
     try:
         rodar_uma_vez()
     except Exception as e:
-        print(f"Erro na execucao: {e}")
+        print(f"Erro na execução: {e}")
         sys.exit(1)
