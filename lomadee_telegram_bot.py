@@ -1,5 +1,12 @@
 """
 Bot de ofertas: Lomadee API -> Telegram
+
+O que este script faz:
+  1. Busca produtos/ofertas na API da Lomadee (GET /affiliate/products)
+  2. Gera o link de afiliado encurtado (POST /affiliate/shortener/url) com fallback
+  3. Formata uma mensagem com preco, desconto e link
+  4. Posta no seu canal/grupo do Telegram via Bot API
+  5. Guarda os IDs ja postados num arquivo local para nao repetir ofertas
 """
 
 import json
@@ -45,6 +52,10 @@ def salvar_postados(postados):
 
 
 def buscar_produtos():
+    """
+    GET /affiliate/products - busca produtos de todas as marcas às quais
+    a conta tem acesso.
+    """
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
     headers = {"x-api-key": LOMADEE_API_KEY}
     produtos = []
@@ -69,10 +80,10 @@ def buscar_produtos():
     return produtos
 
 
-def encurtar_url(url_original, organization_id, feature_id=None, tipo="custom"):
+def encurtar_url(url_original, organization_id, feature_id=None):
     """
     POST /affiliate/shortener/url
-    Envia payload completo com domains e tipo correto para evitar erro 400.
+    Tenta encurtar o link. Caso retorne 400 ou falhe, retorna a URL original como fallback.
     """
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
@@ -81,30 +92,37 @@ def encurtar_url(url_original, organization_id, feature_id=None, tipo="custom"):
     }
     payload = {
         "url": url_original,
-        "organizationId": organization_id,
-        "type": tipo.lower(),
-        "domains": [1]  # ID padrao do dominio de encurtador da Lomadee
+        "organizationId": int(organization_id) if str(organization_id).isdigit() else organization_id,
+        "type": "custom"
     }
     if feature_id:
         payload["featureId"] = feature_id
 
-    resp = requests.post(endpoint, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
+        
+        # Se retornar erro 400 ou outro erro da API, captura sem interromper
+        if resp.status_code != 200 and resp.status_code != 201:
+            return url_original
 
-    # Leitura segura da resposta da API
-    if isinstance(data, dict):
-        if "shortUrl" in data and data["shortUrl"]:
-            return data["shortUrl"]
-        if "url" in data and data["url"]:
-            return data["url"]
-        if isinstance(data.get("type"), list) and data["type"]:
-            item = data["type"][0]
-            if isinstance(item, dict):
-                short_urls = item.get("shortUrls")
-                if isinstance(short_urls, list) and short_urls:
-                    return short_urls[0]
-                return item.get("shortUrl") or url_original
+        data = resp.json()
+
+        # Tratamento flexivel da resposta JSON
+        if isinstance(data, dict):
+            if "shortUrl" in data and data["shortUrl"]:
+                return data["shortUrl"]
+            if "url" in data and data["url"]:
+                return data["url"]
+            if isinstance(data.get("type"), list) and data["type"]:
+                item = data["type"][0]
+                if isinstance(item, dict):
+                    short_urls = item.get("shortUrls")
+                    if isinstance(short_urls, list) and short_urls:
+                        return short_urls[0]
+                    return item.get("shortUrl") or url_original
+
+    except Exception:
+        pass
 
     return url_original
 
@@ -129,13 +147,16 @@ def extrair_dados_produto(produto):
     if isinstance(imagens, list) and imagens:
         imagem = (imagens[0] or {}).get("url")
 
+    # Tenta usar diretamente a URL tratada do produto caso o encurtador falhe
+    link_produto = produto.get("link") or produto.get("url") or produto.get("productUrl")
+
     return {
         "id": produto.get("id") or produto.get("productId"),
         "organization_id": produto.get("organizationId"),
         "nome": produto.get("name") or produto.get("title", "Produto"),
         "preco": preco,
         "preco_original": preco_original,
-        "url": produto.get("url") or produto.get("productUrl"),
+        "url": link_produto,
         "imagem": imagem or produto.get("image") or produto.get("imageUrl"),
     }
 
@@ -209,23 +230,11 @@ def rodar_uma_vez():
         if p["id"] in postados:
             continue
 
-        # Pequena pausa entre cada tentativa de encurtamento para evitar o erro 429
-        time.sleep(1)
-
-        try:
-            p["link_afiliado"] = encurtar_url(
-                p["url"],
-                p["organization_id"],
-            )
-        except requests.HTTPError as e:
-            print(f"Erro ao gerar link afiliado para {p['nome']}: {e}")
-            if e.response is not None and e.response.status_code == 429:
-                print("Rate limit atingido (429). Aguardando 10 segundos...")
-                time.sleep(10)
-            continue
-        except Exception as e:
-            print(f"Erro inesperado ao encurtar link para {p['nome']}: {e}")
-            continue
+        # Encurta ou usa a URL original caso a API do encurtador recuse (Fallback)
+        p["link_afiliado"] = encurtar_url(
+            p["url"],
+            p["organization_id"],
+        )
 
         marcas.add(str(p["organization_id"]))
         mensagem = formatar_mensagem(p)
