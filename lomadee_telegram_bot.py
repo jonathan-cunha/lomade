@@ -34,11 +34,27 @@ PRECO_EM_CENTAVOS = os.environ.get("PRECO_EM_CENTAVOS", "0") == "1"
 
 # Palavras-chave que definem o que o robo pode postar. Um produto so passa
 # se o nome dele contiver pelo menos uma dessas palavras (sem acento,
-# sem diferenciar maiusculas/minusculas).
+# sem diferenciar maiusculas/minusculas). Ajuste essa lista a vontade.
 PALAVRAS_CHAVE = [
+    # Celulares e eletronicos
     "celular", "smartphone", "iphone", "galaxy", "xiaomi", "motorola",
-    "suplemento", "whey", "creatina", "bcaa", "pre treino", "album",
-    "tv", "televisao", "smart tv",
+    "fone de ouvido", "fone bluetooth", "carregador", "power bank",
+    "notebook", "tablet", "smartwatch",
+    # TV e video game
+    "tv", "televisao", "smart tv", "video game", "playstation", "xbox",
+    "nintendo", "controle de video game",
+    # Suplementos e academia
+    "suplemento", "whey", "creatina", "bcaa", "pre treino", "albumina",
+    "barra de proteina",
+    # Roupas e calcados
+    "camiseta", "camisa", "calça", "vestido", "jaqueta", "tenis",
+    "sapato", "sandalia", "bolsa",
+    # Eletrodomesticos
+    "geladeira", "fogao", "microondas", "air fryer", "liquidificador",
+    "aspirador de po", "ventilador", "ar condicionado", "maquina de lavar",
+    # Itens para carro
+    "som automotivo", "pneu", "bateria automotiva", "acessorio para carro",
+    "capa de banco", "tapete automotivo",
 ]
 
 PRODUCT_SEARCH_PARAMS = {
@@ -281,13 +297,20 @@ def rodar_uma_vez():
 
     novos = 0
     falhas_telegram = 0
+    pulados_campo_faltando = 0
+    pulados_ja_postado = 0
     marcas = set()
     for produto_bruto in relevantes:
         p = extrair_dados_produto(produto_bruto)
 
         if not p["id"] or not p["url"] or not p["organization_id"]:
+            pulados_campo_faltando += 1
+            print(f"[debug] pulado por falta de campo -> id={p['id']!r} "
+                  f"url={p['url']!r} organization_id={p['organization_id']!r} "
+                  f"nome={p['nome']!r}")
             continue
         if p["id"] in postados:
+            pulados_ja_postado += 1
             continue
 
         p["link_afiliado"] = encurtar_url(
@@ -310,7 +333,9 @@ def rodar_uma_vez():
     salvar_postados(postados)
     print(
         f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas. "
-        f"{falhas_telegram} falharam ao enviar pro Telegram."
+        f"{falhas_telegram} falharam ao enviar pro Telegram. "
+        f"{pulados_campo_faltando} pulados por falta de dados. "
+        f"{pulados_ja_postado} pulados por ja terem sido postados antes."
     )
 
 
