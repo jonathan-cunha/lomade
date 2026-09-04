@@ -72,6 +72,11 @@ def encurtar_url(url_original, organization_id, feature_id=None):
     """
     POST /affiliate/shortener/url
     Ajustado estritamente para as exigências do schema da Lomadee.
+
+    Retorna o link encurtado (link de afiliado) quando a API responde certo.
+    Retorna None quando não foi possível gerar o link de afiliado, para que
+    quem chamar essa função decida pular o produto em vez de postar um link
+    sem rastreamento de comissão.
     """
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
@@ -91,8 +96,17 @@ def encurtar_url(url_original, organization_id, feature_id=None):
     resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
     
     if not resp.ok:
-        print(f"Erro no encurtador ({resp.status_code}): {resp.text}")
-        return url_original
+        motivo = resp.text
+        try:
+            motivo_json = resp.json()
+            motivo = motivo_json.get("message") or motivo_json.get("code") or resp.text
+        except Exception:
+            pass
+        print(
+            f"[ENCURTADOR] Falhou ({resp.status_code}) para organizationId={organization_id}: "
+            f"{motivo}"
+        )
+        return None
 
     data = resp.json()
 
@@ -108,7 +122,8 @@ def encurtar_url(url_original, organization_id, feature_id=None):
                 if isinstance(short_urls, list) and short_urls:
                     return short_urls[0]
 
-    return url_original
+    print(f"[ENCURTADOR] Resposta OK mas sem shortUrl reconhecível para organizationId={organization_id}: {data}")
+    return None
 
 
 def extrair_dados_produto(produto):
@@ -191,7 +206,13 @@ def enviar_telegram(texto, imagem_url=None):
 
     resp = requests.post(endpoint, json=payload, timeout=30)
     if not resp.ok:
-        print(f"Erro ao enviar pro Telegram: {resp.status_code} - {resp.text}")
+        motivo = resp.text
+        try:
+            motivo_json = resp.json()
+            motivo = motivo_json.get("description") or resp.text
+        except Exception:
+            pass
+        print(f"[TELEGRAM] Falhou ({resp.status_code}): {motivo}")
     return resp.ok
 
 
@@ -204,6 +225,8 @@ def rodar_uma_vez():
         return
 
     novos = 0
+    pulados_sem_link = 0
+    falhas_telegram = 0
     marcas = set()
     for produto_bruto in produtos:
         p = extrair_dados_produto(produto_bruto)
@@ -213,22 +236,36 @@ def rodar_uma_vez():
         if p["id"] in postados:
             continue
 
-        p["link_afiliado"] = encurtar_url(
+        link_afiliado = encurtar_url(
             p["url"],
             p["organization_id"],
         )
 
+        if not link_afiliado:
+            # Não gera comissão sem o link de afiliado, então pula o produto
+            # em vez de postar o link original.
+            pulados_sem_link += 1
+            print(f"[PULADO] Sem link de afiliado válido: {p['nome']}")
+            continue
+
+        p["link_afiliado"] = link_afiliado
         marcas.add(str(p["organization_id"]))
         mensagem = formatar_mensagem(p)
 
         if enviar_telegram(mensagem, imagem_url=p["imagem"]):
             postados.add(p["id"])
             novos += 1
-            print(f"Postado: {p['nome']}")
+            print(f"[POSTADO] {p['nome']}")
             time.sleep(2)
+        else:
+            falhas_telegram += 1
 
     salvar_postados(postados)
-    print(f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas.")
+    print(
+        f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas. "
+        f"{pulados_sem_link} puladas por falta de link de afiliado. "
+        f"{falhas_telegram} falharam ao enviar pro Telegram."
+    )
 
 
 if __name__ == "__main__":
