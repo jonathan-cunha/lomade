@@ -1,5 +1,15 @@
 """
 Bot de ofertas: Lomadee API -> Telegram
+
+Correções desta versão:
+1. Agora filtra por palavras-chave (celular, suplementos, TV, etc.) antes de
+   postar - antes o robo pegava QUALQUER produto do catalogo, sem filtro,
+   por isso apareciam coisas sem relacao nenhuma com o canal.
+2. Nao divide mais o preco por 100 automaticamente. A versao anterior
+   assumia que a API manda valores "em centavos", o que gerava precos
+   errados (ex: R$ 199,90 virava R$ 1,99). Agora o valor e usado como a
+   API manda, e o modo de teste (DEBUG=1) mostra os valores brutos para
+   você confirmar que estao corretos antes de ligar o robo de verdade.
 """
 
 import json
@@ -18,6 +28,19 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 DEBUG = os.environ.get("DEBUG") == "1"
 
+# Se a Lomadee realmente manda os precos em centavos (ex: 19990 = R$ 199,90),
+# mude isto para "1". Deixe "0" ate confirmar o formato certo rodando com DEBUG=1.
+PRECO_EM_CENTAVOS = os.environ.get("PRECO_EM_CENTAVOS", "0") == "1"
+
+# Palavras-chave que definem o que o robo pode postar. Um produto so passa
+# se o nome dele contiver pelo menos uma dessas palavras (sem acento,
+# sem diferenciar maiusculas/minusculas).
+PALAVRAS_CHAVE = [
+    "celular", "smartphone", "iphone", "galaxy", "xiaomi", "motorola",
+    "suplemento", "whey", "creatina", "bcaa", "pre treino", "album",
+    "tv", "televisao", "smart tv",
+]
+
 PRODUCT_SEARCH_PARAMS = {
     "limit": 100,
     "isAvailable": True,
@@ -25,7 +48,21 @@ PRODUCT_SEARCH_PARAMS = {
 
 POSTADOS_PATH = "postados.json"
 
+# Respeitar o limite de 10 pedidos por minuto da API da Lomadee
+PAUSA_ENTRE_PEDIDOS_API = 6.5  # segundos
+
 # ======================================================================
+
+
+def normalizar(texto: str) -> str:
+    """Remove acentos e deixa em minusculas, para comparar palavras-chave."""
+    substituicoes = str.maketrans("áàâãéêíóôõúüç", "aaaaeeiooouuc")
+    return (texto or "").lower().translate(substituicoes)
+
+
+def produto_interessa(nome_produto: str) -> bool:
+    nome_normalizado = normalizar(nome_produto)
+    return any(normalizar(palavra) in nome_normalizado for palavra in PALAVRAS_CHAVE)
 
 
 def carregar_postados():
@@ -64,6 +101,7 @@ def buscar_produtos():
         if page >= total_pages or not pagina:
             break
         page += 1
+        time.sleep(PAUSA_ENTRE_PEDIDOS_API)
 
     return produtos
 
@@ -79,7 +117,7 @@ def encurtar_url(url_original, organization_id, feature_id=None):
         "Content-Type": "application/json",
         "x-api-key": LOMADEE_API_KEY,
     }
-    
+
     payload = {
         "url": url_original,
         "organizationId": int(organization_id) if str(organization_id).isdigit() else organization_id,
@@ -90,7 +128,7 @@ def encurtar_url(url_original, organization_id, feature_id=None):
 
     try:
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
-        
+
         if not resp.ok:
             print(f"[ENCURTADOR] Falhou ({resp.status_code}) - Usando URL original de fallback.")
             return url_original
@@ -164,10 +202,11 @@ def formatar_mensagem(p):
     preco_atual = p.get("preco")
     preco_original = p.get("preco_original")
 
-    if isinstance(preco_atual, (int, float)):
-        preco_atual = preco_atual / 100
-    if isinstance(preco_original, (int, float)):
-        preco_original = preco_original / 100
+    if PRECO_EM_CENTAVOS:
+        if isinstance(preco_atual, (int, float)):
+            preco_atual = preco_atual / 100
+        if isinstance(preco_original, (int, float)):
+            preco_original = preco_original / 100
 
     linhas = [f"🔥 *{p['nome']}*"]
 
@@ -220,15 +259,30 @@ def enviar_telegram(texto, imagem_url=None):
 def rodar_uma_vez():
     postados = carregar_postados()
     produtos = buscar_produtos()
+    print(f"[debug] {len(produtos)} produtos recebidos da Lomadee (antes do filtro)")
+
+    relevantes = [p for p in produtos if produto_interessa(
+        p.get("name") or p.get("title") or ""
+    )]
+    print(f"[debug] {len(relevantes)} produtos combinam com as palavras-chave configuradas")
 
     if DEBUG:
-        print(json.dumps(produtos[:2], indent=2, ensure_ascii=False))
+        for produto_bruto in relevantes[:3]:
+            p = extrair_dados_produto(produto_bruto)
+            print(json.dumps({
+                "nome": p["nome"],
+                "preco_bruto_da_api": p["preco"],
+                "preco_original_bruto_da_api": p["preco_original"],
+            }, indent=2, ensure_ascii=False))
+        print("[debug] Modo DEBUG ativo - nada foi postado no Telegram. "
+              "Confira se os valores de preco acima batem com o preco real do produto "
+              "(pesquise o nome do produto no Google pra comparar).")
         return
 
     novos = 0
     falhas_telegram = 0
     marcas = set()
-    for produto_bruto in produtos:
+    for produto_bruto in relevantes:
         p = extrair_dados_produto(produto_bruto)
 
         if not p["id"] or not p["url"] or not p["organization_id"]:
@@ -240,6 +294,7 @@ def rodar_uma_vez():
             p["url"],
             p["organization_id"],
         )
+        time.sleep(PAUSA_ENTRE_PEDIDOS_API)
 
         marcas.add(str(p["organization_id"]))
         mensagem = formatar_mensagem(p)
