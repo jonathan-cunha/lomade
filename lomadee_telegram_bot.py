@@ -110,6 +110,7 @@ def encurtar_url(url_original, organization_id, feature_id=None):
 
     data = resp.json()
 
+    # Formato mais comum retornado pela API: dict direto com shortUrl/url
     if isinstance(data, dict):
         if "shortUrl" in data and data["shortUrl"]:
             return data["shortUrl"]
@@ -121,6 +122,22 @@ def encurtar_url(url_original, organization_id, feature_id=None):
                 short_urls = item.get("shortUrls")
                 if isinstance(short_urls, list) and short_urls:
                     return short_urls[0]
+
+    # Formato observado na prática: lista na raiz, com o link dentro de
+    # availableChannels -> shortUrls
+    # Ex: [{"name": "Garimpo Digital", "availableChannels": [{"name": "GarimpoMedia", "shortUrls": ["https://leiaia.link/xxxxx"]}]}]
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            canais = item.get("availableChannels") or []
+            if isinstance(canais, list):
+                for canal in canais:
+                    if not isinstance(canal, dict):
+                        continue
+                    short_urls = canal.get("shortUrls")
+                    if isinstance(short_urls, list) and short_urls:
+                        return short_urls[0]
 
     print(f"[ENCURTADOR] Resposta OK mas sem shortUrl reconhecível para organizationId={organization_id}: {data}")
     return None
