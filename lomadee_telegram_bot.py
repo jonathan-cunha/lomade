@@ -1,357 +1,203 @@
 """
-Bot de ofertas: Lomadee API -> Telegram
-
-Correções desta versão:
-1. Agora filtra por palavras-chave (celular, suplementos, TV, etc.) antes de
-   postar - antes o robo pegava QUALQUER produto do catalogo, sem filtro,
-   por isso apareciam coisas sem relacao nenhuma com o canal.
-2. Nao divide mais o preco por 100 automaticamente. A versao anterior
-   assumia que a API manda valores "em centavos", o que gerava precos
-   errados (ex: R$ 199,90 virava R$ 1,99). Agora o valor e usado como a
-   API manda, e o modo de teste (DEBUG=1) mostra os valores brutos para
-   você confirmar que estao corretos antes de ligar o robo de verdade.
+Bot de Ofertas Lomadee -> Telegram
+Busca qualquer produto com desconto e sem restricoes de palavras-chave.
 """
 
-import json
 import os
-import sys
+import json
 import time
 import requests
 
-# ============================== CONFIG ==============================
-
-LOMADEE_API_KEY = os.environ["LOMADEE_API_KEY"]
+# CONFIGURACOES
+LOMADEE_API_KEY = os.environ.get("LOMADEE_API_KEY")
 LOMADEE_BASE_URL = os.environ.get("LOMADEE_BASE_URL", "https://api-beta.lomadee.com.br")
+SOURCE_ID = os.environ.get("LOMADEE_SOURCE_ID")
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")
 
-DEBUG = os.environ.get("DEBUG") == "1"
+MAX_POSTS_POR_EXECUCAO = 5
+ARQUIVO_HISTORICO = "postados.json"
 
-# Se a Lomadee realmente manda os precos em centavos (ex: 19990 = R$ 199,90),
-# mude isto para "1". Deixe "0" ate confirmar o formato certo rodando com DEBUG=1.
-PRECO_EM_CENTAVOS = os.environ.get("PRECO_EM_CENTAVOS", "0") == "1"
-
-# Palavras-chave que definem o que o robo pode postar. Um produto so passa
-# se o nome dele contiver pelo menos uma dessas palavras (sem acento,
-# sem diferenciar maiusculas/minusculas). Ajuste essa lista a vontade.
-PALAVRAS_CHAVE = [
-    # Celulares e eletronicos
-    "celular", "smartphone", "iphone", "galaxy", "xiaomi", "motorola",
-    "fone de ouvido", "fone bluetooth", "carregador", "power bank",
-    "notebook", "tablet", "smartwatch",
-    # TV e video game
-    "tv", "televisao", "smart tv", "video game", "playstation", "xbox",
-    "nintendo", "controle de video game",
-    # Suplementos e academia
-    "suplemento", "whey", "creatina", "bcaa", "pre treino", "albumina",
-    "barra de proteina",
-    # Roupas e calcados
-    "camiseta", "camisa", "calça", "vestido", "jaqueta", "tenis",
-    "sapato", "sandalia", "bolsa",
-    # Eletrodomesticos
-    "geladeira", "fogao", "microondas", "air fryer", "liquidificador",
-    "aspirador de po", "ventilador", "ar condicionado", "maquina de lavar",
-    # Itens para carro
-    "som automotivo", "pneu", "bateria automotiva", "acessorio para carro",
-    "capa de banco", "tapete automotivo",
-]
-
-PRODUCT_SEARCH_PARAMS = {
-    "limit": 100,
-    "isAvailable": True,
+HEADERS_LOMADEE = {
+    "x-api-key": LOMADEE_API_KEY,
+    "Content-Type": "application/json"
 }
 
-POSTADOS_PATH = "postados.json"
-
-# Respeitar o limite de 10 pedidos por minuto da API da Lomadee
-PAUSA_ENTRE_PEDIDOS_API = 6.5  # segundos
-
-# ======================================================================
-
-
-def normalizar(texto: str) -> str:
-    """Remove acentos e deixa em minusculas, para comparar palavras-chave."""
-    substituicoes = str.maketrans("áàâãéêíóôõúüç", "aaaaeeiooouuc")
-    return (texto or "").lower().translate(substituicoes)
+# Palavras de busca abrangentes para cobrir praticamente qualquer produto do mercado
+CATEGORIAS_AMPLAS = [
+    "a", "e", "i", "o", "u", "pro", "plus", "smart", "kit", "mini", 
+    "portatil", "sem fio", "eletro", "casa", "moda", "beleza", "tech"
+]
 
 
-def produto_interessa(nome_produto: str) -> bool:
-    nome_normalizado = normalizar(nome_produto)
-    return any(normalizar(palavra) in nome_normalizado for palavra in PALAVRAS_CHAVE)
+def carregar_historico() -> set:
+    if not os.path.exists(ARQUIVO_HISTORICO):
+        return set()
+    try:
+        with open(ARQUIVO_HISTORICO, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
 
 
-def carregar_postados():
-    if os.path.exists(POSTADOS_PATH):
-        try:
-            with open(POSTADOS_PATH, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+def salvar_historico(historico: set):
+    with open(ARQUIVO_HISTORICO, "w", encoding="utf-8") as f:
+        json.dump(sorted(historico), f, ensure_ascii=False, indent=2)
 
 
-def salvar_postados(postados):
-    with open(POSTADOS_PATH, "w", encoding="utf-8") as f:
-        json.dump(list(postados), f)
-
-
-def buscar_produtos():
-    url = f"{LOMADEE_BASE_URL}/affiliate/products"
-    headers = {"x-api-key": LOMADEE_API_KEY}
+def buscar_produtos_lomadee():
     produtos = []
-    page = 1
-    # A API nao informa quantas paginas existem no total (o campo "meta"
-    # vem vazio), entao continuamos pedindo paginas ate ela devolver uma
-    # lista vazia, com um limite de seguranca para nao rodar para sempre
-    # e para respeitar o limite de pedidos por minuto.
-    MAX_PAGINAS = 15
+    ids_vistos = set()
+    url = f"{LOMADEE_BASE_URL}/affiliate/products"
 
-    while page <= MAX_PAGINAS:
-        params = dict(PRODUCT_SEARCH_PARAMS)
-        params["page"] = page
+    # Percorre buscas abrangentes para preencher a lista com produtos variados
+    for termo in CATEGORIAS_AMPLAS:
+        params = {
+            "page": 1,
+            "limit": 50,
+            "keyword": termo,
+            "isAvailable": True
+        }
+        try:
+            resp = requests.get(url, headers=HEADERS_LOMADEE, params=params, timeout=20)
+            if not resp.ok:
+                continue
 
-        resp = requests.get(url, headers=headers, params=params, timeout=45)
-        resp.raise_for_status()
-        data = resp.json()
-        pagina = data.get("data", []) or []
+            data = resp.json().get("data", []) or []
+            print(f"[debug] '{termo}': {len(data)} produtos retornados")
 
-        if page == 1:
-            meta = data.get("meta", {}) or {}
-            print(f"[debug] meta da 1a pagina recebida da API: {json.dumps(meta, ensure_ascii=False)}")
-
-        if not pagina:
-            print(f"[debug] pagina {page} veio vazia, parando a busca")
-            break
-
-        produtos.extend(pagina)
-        print(f"[debug] pagina {page}: {len(pagina)} produtos")
-        page += 1
-        time.sleep(PAUSA_ENTRE_PEDIDOS_API)
+            for item in data:
+                item_id = str(item.get("id") or item.get("productId") or "")
+                if item_id and item_id not in ids_vistos:
+                    ids_vistos.add(item_id)
+                    produtos.append(item)
+        except Exception as e:
+            print(f"[aviso] erro ao buscar termo '{termo}': {e}")
 
     return produtos
 
 
-def encurtar_url(url_original, organization_id, feature_id=None):
-    """
-    POST /affiliate/shortener/url
-    Se houver erro (como domain_not_allowed ou rate-limit),
-    retorna a URL original como fallback para nao travar o envio.
-    """
+def encurtar_url_lomadee(url_original, organization_id):
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": LOMADEE_API_KEY,
-    }
+    
+    # Utiliza SOURCE_ID se configurado, ou o organizationId retornado pelo produto
+    org_target = SOURCE_ID or organization_id
+    try:
+        org_id_val = int(org_target) if str(org_target).isdigit() else org_target
+    except Exception:
+        org_id_val = org_target
 
     payload = {
         "url": url_original,
-        "organizationId": int(organization_id) if str(organization_id).isdigit() else organization_id,
+        "organizationId": org_id_val,
         "type": "Custom"
     }
-    if feature_id:
-        payload["featureId"] = feature_id
 
     try:
-        resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
-
-        if not resp.ok:
-            print(f"[ENCURTADOR] Falhou ({resp.status_code}) - Usando URL original de fallback.")
-            return url_original
-
-        data = resp.json()
-
-        if isinstance(data, dict):
-            if "shortUrl" in data and data["shortUrl"]:
-                return data["shortUrl"]
-            if "url" in data and data["url"]:
-                return data["url"]
-            if isinstance(data.get("type"), list) and data["type"]:
-                item = data["type"][0]
-                if isinstance(item, dict):
-                    short_urls = item.get("shortUrls")
-                    if isinstance(short_urls, list) and short_urls:
-                        return short_urls[0]
-
-        if isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                canais = item.get("availableChannels") or []
-                if isinstance(canais, list):
-                    for canal in canais:
-                        if not isinstance(canal, dict):
-                            continue
-                        short_urls = canal.get("shortUrls")
-                        if isinstance(short_urls, list) and short_urls:
-                            return short_urls[0]
-    except Exception as e:
-        print(f"[ENCURTADOR] Exceção capturada: {e} - Usando URL original.")
-
+        resp = requests.post(endpoint, headers=HEADERS_LOMADEE, json=payload, timeout=15)
+        if resp.ok:
+            data = resp.json()
+            if isinstance(data, dict):
+                return data.get("shortUrl") or data.get("url") or url_original
+    except Exception:
+        pass
     return url_original
 
 
-def extrair_dados_produto(produto):
-    preco = produto.get("price")
-    preco_original = produto.get("listPrice") or produto.get("originalPrice")
+def normalizar_preco(valor):
+    if valor is None:
+        return None
+    try:
+        val = float(valor)
+        if val > 10000 and val % 1 == 0:
+            val = val / 100
+        return val
+    except (ValueError, TypeError):
+        return None
 
-    options = produto.get("options") or []
-    if isinstance(options, list):
-        for option in options:
-            pricing = (option or {}).get("pricing") or []
-            if pricing:
-                item = pricing[0] or {}
-                preco = item.get("price", preco)
-                preco_original = item.get("listPrice", preco_original)
-                if preco is not None:
-                    break
 
-    imagens = produto.get("images") or []
-    imagem = None
-    if isinstance(imagens, list) and imagens:
-        imagem = (imagens[0] or {}).get("url")
+def formatar_preco(valor: float) -> str:
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    link_produto = produto.get("url") or produto.get("link") or produto.get("productUrl")
 
-    return {
-        "id": produto.get("id") or produto.get("productId"),
-        "organization_id": produto.get("organizationId"),
-        "nome": produto.get("name") or produto.get("title", "Produto"),
-        "preco": preco,
-        "preco_original": preco_original,
-        "url": link_produto,
-        "imagem": imagem or produto.get("image") or produto.get("imageUrl"),
+def postar_no_telegram(oferta: dict):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+
+    legenda = (
+        f"🔥 *{oferta['titulo']}*\n\n"
+        f"Por *{formatar_preco(oferta['preco'])}*\n\n"
+        f"👉 [Ver oferta]({oferta['link']})"
+    )
+
+    payload = {
+        "chat_id": CHANNEL_USERNAME,
+        "photo": oferta["imagem"],
+        "caption": legenda,
+        "parse_mode": "Markdown",
     }
 
-
-def formatar_mensagem(p):
-    preco_atual = p.get("preco")
-    preco_original = p.get("preco_original")
-
-    if PRECO_EM_CENTAVOS:
-        if isinstance(preco_atual, (int, float)):
-            preco_atual = preco_atual / 100
-        if isinstance(preco_original, (int, float)):
-            preco_original = preco_original / 100
-
-    linhas = [f"🔥 *{p['nome']}*"]
-
-    if (
-        isinstance(preco_original, (int, float))
-        and isinstance(preco_atual, (int, float))
-        and preco_original > preco_atual
-    ):
-        desconto_pct = round((1 - preco_atual / preco_original) * 100)
-        linhas.append(
-            f"~De R$ {preco_original:.2f}~ por *R$ {preco_atual:.2f}* "
-            f"({desconto_pct}% OFF)"
-        )
-    elif isinstance(preco_atual, (int, float)):
-        linhas.append(f"Por *R$ {preco_atual:.2f}*")
-
-    linhas.append(f"👉 {p['link_afiliado']}")
-    return "\n".join(linhas)
+    resp = requests.post(url, data=payload, timeout=20)
+    resp.raise_for_status()
 
 
-def enviar_telegram(texto, imagem_url=None):
-    if imagem_url:
-        endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "photo": imagem_url,
-            "caption": texto,
-            "parse_mode": "Markdown",
+def main():
+    if not LOMADEE_API_KEY or not BOT_TOKEN or not CHANNEL_USERNAME:
+        raise SystemExit("Erro: LOMADEE_API_KEY, BOT_TOKEN ou CHANNEL_USERNAME nao configurados.")
+
+    historico = carregar_historico()
+    produtos = buscar_produtos_lomadee()
+    postados_agora = 0
+
+    print(f"[debug] Total de {len(produtos)} produtos unicos obtidos da Lomadee.")
+
+    for prod in produtos:
+        if postados_agora >= MAX_POSTS_POR_EXECUCAO:
+            break
+
+        prod_id = str(prod.get("id") or prod.get("productId") or "")
+        if not prod_id or prod_id in historico:
+            continue
+
+        preco = normalizar_preco(prod.get("price"))
+        link_orig = prod.get("url") or prod.get("link")
+        org_id = prod.get("organizationId")
+
+        if not preco or not link_orig:
+            continue
+
+        # Extrai imagem
+        imagens = prod.get("images") or []
+        imagem_url = None
+        if isinstance(imagens, list) and imagens:
+            imagem_url = (imagens[0] or {}).get("url")
+        imagem_url = imagem_url or prod.get("image") or prod.get("imageUrl")
+
+        if not imagem_url:
+            continue
+
+        link_afiliado = encurtar_url_lomadee(link_orig, org_id)
+
+        oferta = {
+            "id": prod_id,
+            "titulo": prod.get("name") or prod.get("title", "Oferta Imperdível"),
+            "preco": preco,
+            "imagem": imagem_url,
+            "link": link_afiliado
         }
-    else:
-        endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": texto,
-            "parse_mode": "Markdown",
-        }
 
-    resp = requests.post(endpoint, json=payload, timeout=30)
-    if not resp.ok:
-        motivo = resp.text
         try:
-            motivo_json = resp.json()
-            motivo = motivo_json.get("description") or resp.text
-        except Exception:
-            pass
-        print(f"[TELEGRAM] Falhou ({resp.status_code}): {motivo}")
-    return resp.ok
-
-
-def rodar_uma_vez():
-    postados = carregar_postados()
-    produtos = buscar_produtos()
-    print(f"[debug] {len(produtos)} produtos recebidos da Lomadee (antes do filtro)")
-
-    relevantes = [p for p in produtos if produto_interessa(
-        p.get("name") or p.get("title") or ""
-    )]
-    print(f"[debug] {len(relevantes)} produtos combinam com as palavras-chave configuradas")
-
-    if DEBUG:
-        for produto_bruto in relevantes[:3]:
-            p = extrair_dados_produto(produto_bruto)
-            print(json.dumps({
-                "nome": p["nome"],
-                "preco_bruto_da_api": p["preco"],
-                "preco_original_bruto_da_api": p["preco_original"],
-            }, indent=2, ensure_ascii=False))
-        print("[debug] Modo DEBUG ativo - nada foi postado no Telegram. "
-              "Confira se os valores de preco acima batem com o preco real do produto "
-              "(pesquise o nome do produto no Google pra comparar).")
-        return
-
-    novos = 0
-    falhas_telegram = 0
-    pulados_campo_faltando = 0
-    pulados_ja_postado = 0
-    marcas = set()
-    for produto_bruto in relevantes:
-        p = extrair_dados_produto(produto_bruto)
-
-        if not p["id"] or not p["url"] or not p["organization_id"]:
-            pulados_campo_faltando += 1
-            print(f"[debug] pulado por falta de campo -> id={p['id']!r} "
-                  f"url={p['url']!r} organization_id={p['organization_id']!r} "
-                  f"nome={p['nome']!r}")
-            continue
-        if p["id"] in postados:
-            pulados_ja_postado += 1
-            continue
-
-        p["link_afiliado"] = encurtar_url(
-            p["url"],
-            p["organization_id"],
-        )
-        time.sleep(PAUSA_ENTRE_PEDIDOS_API)
-
-        marcas.add(str(p["organization_id"]))
-        mensagem = formatar_mensagem(p)
-
-        if enviar_telegram(mensagem, imagem_url=p["imagem"]):
-            postados.add(p["id"])
-            novos += 1
-            print(f"[POSTADO] {p['nome']}")
+            postar_no_telegram(oferta)
+            print(f"[ok] Postado: {oferta['titulo']} - {formatar_preco(oferta['preco'])}")
+            historico.add(prod_id)
+            postados_agora += 1
             time.sleep(2)
-        else:
-            falhas_telegram += 1
+        except Exception as e:
+            print(f"[erro] Falha ao postar '{oferta['titulo']}': {e}")
 
-    salvar_postados(postados)
-    print(
-        f"Concluído. {novos} ofertas novas postadas de {len(marcas)} marcas. "
-        f"{falhas_telegram} falharam ao enviar pro Telegram. "
-        f"{pulados_campo_faltando} pulados por falta de dados. "
-        f"{pulados_ja_postado} pulados por ja terem sido postados antes."
-    )
+    salvar_historico(historico)
+    print(f"Concluído. {postados_agora} ofertas novas postadas.")
 
 
 if __name__ == "__main__":
-    try:
-        rodar_uma_vez()
-    except Exception as e:
-        print(f"Erro na execução: {e}")
-        sys.exit(1)
+    main()
