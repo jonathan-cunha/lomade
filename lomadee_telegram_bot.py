@@ -18,7 +18,6 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 DEBUG = os.environ.get("DEBUG") == "1"
 
-# Filtros de busca de produtos
 PRODUCT_SEARCH_PARAMS = {
     "limit": 100,
     "isAvailable": True,
@@ -72,7 +71,7 @@ def buscar_produtos():
 def encurtar_url(url_original, organization_id, feature_id=None):
     """
     POST /affiliate/shortener/url
-    Envia a URL usando o campo 'link' exigido pela API da Lomadee.
+    Ajustado estritamente para as exigências do schema da Lomadee.
     """
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
@@ -80,11 +79,11 @@ def encurtar_url(url_original, organization_id, feature_id=None):
         "x-api-key": LOMADEE_API_KEY,
     }
     
-    # A API da Lomadee aceita 'link' no payload
+    # Campo 'url' e 'type' com Capital Case ("Custom")
     payload = {
-        "link": url_original,
+        "url": url_original,
         "organizationId": int(organization_id) if str(organization_id).isdigit() else organization_id,
-        "type": "custom"
+        "type": "Custom"
     }
     if feature_id:
         payload["featureId"] = feature_id
@@ -98,7 +97,16 @@ def encurtar_url(url_original, organization_id, feature_id=None):
     data = resp.json()
 
     if isinstance(data, dict):
-        return data.get("shortUrl") or data.get("url") or data.get("link") or url_original
+        if "shortUrl" in data and data["shortUrl"]:
+            return data["shortUrl"]
+        if "url" in data and data["url"]:
+            return data["url"]
+        if isinstance(data.get("type"), list) and data["type"]:
+            item = data["type"][0]
+            if isinstance(item, dict):
+                short_urls = item.get("shortUrls")
+                if isinstance(short_urls, list) and short_urls:
+                    return short_urls[0]
 
     return url_original
 
@@ -123,7 +131,7 @@ def extrair_dados_produto(produto):
     if isinstance(imagens, list) and imagens:
         imagem = (imagens[0] or {}).get("url")
 
-    link_produto = produto.get("link") or produto.get("url") or produto.get("productUrl")
+    link_produto = produto.get("url") or produto.get("link") or produto.get("productUrl")
 
     return {
         "id": produto.get("id") or produto.get("productId"),
