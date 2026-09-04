@@ -36,8 +36,7 @@ import requests
 # preenchidas a partir dos "Secrets" do repositorio (veja o README).
 
 LOMADEE_API_KEY = os.environ["LOMADEE_API_KEY"]
-LOMADEE_BASE_URL = os.environ.get("LOMADEE_BASE_URL", "https://api.lomadee.com.br")
-ORGANIZATION_ID = os.environ["LOMADEE_ORGANIZATION_ID"]
+LOMADEE_BASE_URL = os.environ.get("LOMADEE_BASE_URL", "https://api-beta.lomadee.com.br")
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -46,11 +45,10 @@ DEBUG = os.environ.get("DEBUG") == "1"
 
 # Filtros de busca de produtos (ajuste como quiser)
 PRODUCT_SEARCH_PARAMS = {
-    "page": 1,
-    "limit": 20,
-    # "keyword": "notebook",
-    # "minPrice": 0,
-    # "maxPrice": 2000,
+    "limit": 100,
+    "isAvailable": True,
+    # "search": "notebook",
+    # "price": "0:200000",  # valores em centavos
 }
 
 POSTADOS_PATH = "postados.json"
@@ -71,16 +69,36 @@ def salvar_postados(postados):
 
 
 def buscar_produtos():
-    """GET /affiliate/products - retorna a lista bruta de produtos da Lomadee."""
+    """
+    GET /affiliate/products - busca produtos de todas as marcas às quais
+    a conta tem acesso. A própria resposta de cada produto informa o
+    organizationId da marca.
+    """
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
     headers = {"x-api-key": LOMADEE_API_KEY}
-    resp = requests.get(url, headers=headers, params=PRODUCT_SEARCH_PARAMS, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("data", [])
+    produtos = []
+    page = 1
+
+    while True:
+        params = dict(PRODUCT_SEARCH_PARAMS)
+        params["page"] = page
+
+        resp = requests.get(url, headers=headers, params=params, timeout=45)
+        resp.raise_for_status()
+        data = resp.json()
+        pagina = data.get("data", []) or []
+        produtos.extend(pagina)
+
+        meta = data.get("meta", {}) or {}
+        total_pages = int(meta.get("totalPages") or page)
+        if page >= total_pages or not pagina:
+            break
+        page += 1
+
+    return produtos
 
 
-def encurtar_url(url_original, feature_id=None, tipo="Custom"):
+def encurtar_url(url_original, organization_id, feature_id=None, tipo="Custom"):
     """POST /affiliate/shortener/url - gera o link de afiliado encurtado."""
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     headers = {
@@ -89,7 +107,7 @@ def encurtar_url(url_original, feature_id=None, tipo="Custom"):
     }
     payload = {
         "url": url_original,
-        "organizationId": ORGANIZATION_ID,
+        "organizationId": organization_id,
         "type": tipo,  # "Custom", "Offer", "Coupon" ou "BrandPage"
     }
     if feature_id:
@@ -111,24 +129,60 @@ def extrair_dados_produto(produto):
     Ajuste as chaves aqui se o JSON real vier com nomes diferentes
     (rode em modo DEBUG pra conferir).
     """
+    preco = produto.get("price")
+    preco_original = produto.get("listPrice") or produto.get("originalPrice")
+
+    # Na API atual, os preços ficam normalmente dentro de options[].pricing[].
+    options = produto.get("options") or []
+    if isinstance(options, list):
+        for option in options:
+            pricing = (option or {}).get("pricing") or []
+            if pricing:
+                item = pricing[0] or {}
+                preco = item.get("price", preco)
+                preco_original = item.get("listPrice", preco_original)
+                if preco is not None:
+                    break
+
+    imagens = produto.get("images") or []
+    imagem = None
+    if isinstance(imagens, list) and imagens:
+        imagem = (imagens[0] or {}).get("url")
+
     return {
         "id": produto.get("id") or produto.get("productId"),
+        "organization_id": produto.get("organizationId"),
         "nome": produto.get("name") or produto.get("title", "Produto"),
-        "preco": produto.get("price"),
-        "preco_desconto": produto.get("discountPrice") or produto.get("salePrice"),
+        "preco": preco,
+        "preco_original": preco_original,
         "url": produto.get("url") or produto.get("productUrl"),
-        "imagem": produto.get("image") or produto.get("imageUrl"),
+        "imagem": imagem or produto.get("image") or produto.get("imageUrl"),
     }
 
 
 def formatar_mensagem(p):
-    preco_atual = p["preco_desconto"] or p["preco"]
+    preco_atual = p.get("preco")
+    preco_original = p.get("preco_original")
+
+    # A API retorna preços em centavos.
+    if isinstance(preco_atual, (int, float)):
+        preco_atual = preco_atual / 100
+    if isinstance(preco_original, (int, float)):
+        preco_original = preco_original / 100
+
     linhas = [f"🔥 *{p['nome']}*"]
 
-    if p["preco"] and p["preco_desconto"] and p["preco_desconto"] < p["preco"]:
-        desconto_pct = round((1 - p["preco_desconto"] / p["preco"]) * 100)
-        linhas.append(f"~De R$ {p['preco']:.2f}~ por *R$ {preco_atual:.2f}* ({desconto_pct}% OFF)")
-    elif preco_atual:
+    if (
+        isinstance(preco_original, (int, float))
+        and isinstance(preco_atual, (int, float))
+        and preco_original > preco_atual
+    ):
+        desconto_pct = round((1 - preco_atual / preco_original) * 100)
+        linhas.append(
+            f"~De R$ {preco_original:.2f}~ por *R$ {preco_atual:.2f}* "
+            f"({desconto_pct}% OFF)"
+        )
+    elif isinstance(preco_atual, (int, float)):
         linhas.append(f"Por *R$ {preco_atual:.2f}*")
 
     linhas.append(f"👉 {p['link_afiliado']}")
@@ -163,19 +217,28 @@ def rodar_uma_vez():
     produtos = buscar_produtos()
 
     if DEBUG:
-        print(json.dumps(produtos[:1], indent=2, ensure_ascii=False))
+        print(json.dumps(produtos[:2], indent=2, ensure_ascii=False))
         return
 
     novos = 0
+    marcas = set()
     for produto_bruto in produtos:
         p = extrair_dados_produto(produto_bruto)
 
-        if not p["id"] or not p["url"]:
+        if not p["id"] or not p["url"] or not p["organization_id"]:
             continue
         if p["id"] in postados:
             continue
 
-        p["link_afiliado"] = encurtar_url(p["url"])
+        try:
+            p["link_afiliado"] = encurtar_url(
+                p["url"],
+                p["organization_id"],
+            )
+        except requests.HTTPError as e:
+            print(f"Erro ao gerar link afiliado para {p['nome']}: {e}")
+            continue
+        marcas.add(str(p["organization_id"]))
         mensagem = formatar_mensagem(p)
 
         if enviar_telegram(mensagem, imagem_url=p["imagem"]):
@@ -185,7 +248,7 @@ def rodar_uma_vez():
             time.sleep(2)  # evita rate limit do Telegram
 
     salvar_postados(postados)
-    print(f"Concluido. {novos} ofertas novas postadas.")
+    print(f"Concluido. {novos} ofertas novas postadas de {len(marcas)} marcas.")
 
 
 if __name__ == "__main__":
