@@ -1,6 +1,6 @@
 """
 Bot de Ofertas Lomadee -> Telegram
-Busca qualquer produto com desconto e sem restricoes de palavras-chave.
+Busca ofertas ativas na Lomadee e envia para o Telegram.
 """
 
 import os
@@ -24,10 +24,10 @@ HEADERS_LOMADEE = {
     "Content-Type": "application/json"
 }
 
-# Palavras de busca abrangentes para cobrir praticamente qualquer produto do mercado
+# Palavras-chave de busca abrangentes
 CATEGORIAS_AMPLAS = [
-    "a", "e", "i", "o", "u", "pro", "plus", "smart", "kit", "mini", 
-    "portatil", "sem fio", "eletro", "casa", "moda", "beleza", "tech"
+    "smartphone", "tv", "notebook", "fone", "geladeira", 
+    "air fryer", "smartwatch", "ferramentas", "gamer", "cafeteira"
 ]
 
 
@@ -51,23 +51,27 @@ def buscar_produtos_lomadee():
     ids_vistos = set()
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
 
-    # Percorre buscas abrangentes para preencher a lista com produtos variados
     for termo in CATEGORIAS_AMPLAS:
         params = {
             "page": 1,
-            "limit": 50,
-            "keyword": termo,
-            "isAvailable": True
+            "limit": 30,
+            "keyword": termo
         }
         try:
             resp = requests.get(url, headers=HEADERS_LOMADEE, params=params, timeout=20)
             if not resp.ok:
+                print(f"[aviso] Erro HTTP {resp.status_code} para '{termo}': {resp.text}")
                 continue
 
-            data = resp.json().get("data", []) or []
-            print(f"[debug] '{termo}': {len(data)} produtos retornados")
+            data = resp.json()
+            # Trata respostas em lista ou dicionario
+            itens = data.get("data", []) if isinstance(data, dict) else data
+            if not isinstance(itens, list):
+                itens = []
 
-            for item in data:
+            print(f"[debug] '{termo}': {len(itens)} produtos retornados")
+
+            for item in itens:
                 item_id = str(item.get("id") or item.get("productId") or "")
                 if item_id and item_id not in ids_vistos:
                     ids_vistos.add(item_id)
@@ -81,7 +85,6 @@ def buscar_produtos_lomadee():
 def encurtar_url_lomadee(url_original, organization_id):
     endpoint = f"{LOMADEE_BASE_URL}/affiliate/shortener/url"
     
-    # Utiliza SOURCE_ID se configurado, ou o organizationId retornado pelo produto
     org_target = SOURCE_ID or organization_id
     try:
         org_id_val = int(org_target) if str(org_target).isdigit() else org_target
@@ -166,11 +169,10 @@ def main():
         if not preco or not link_orig:
             continue
 
-        # Extrai imagem
         imagens = prod.get("images") or []
         imagem_url = None
         if isinstance(imagens, list) and imagens:
-            imagem_url = (imagens[0] or {}).get("url")
+            imagem_url = (imagens[0] or {}).get("url") if isinstance(imagens[0], dict) else imagens[0]
         imagem_url = imagem_url or prod.get("image") or prod.get("imageUrl")
 
         if not imagem_url:
