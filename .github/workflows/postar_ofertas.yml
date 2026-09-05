@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: '*/30 * * * *' # Executa a cada 30 minutos
 
+permissions:
+  contents: write # Garante permissao de escrita para fazer o git push
+
 jobs:
   build:
     runs-on: ubuntu-latest
