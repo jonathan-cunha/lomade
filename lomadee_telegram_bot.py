@@ -1,6 +1,6 @@
 """
 Bot de Ofertas Lomadee -> Telegram
-Processamento flexivel de preços e links para garantir postagem de ofertas.
+Injeta sourceId para garantir o retorno de links e preços válidos.
 """
 
 import os
@@ -46,10 +46,16 @@ def buscar_produtos_lomadee():
     ids_vistos = set()
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
 
-    # Seleciona paginas variadas
     paginas_sorteadas = random.sample(range(1, 100), 10)
     for pagina in paginas_sorteadas:
-        params = {"page": pagina, "limit": 100}
+        params = {
+            "page": pagina,
+            "limit": 100
+        }
+        if SOURCE_ID:
+            params["sourceId"] = SOURCE_ID
+            params["siteId"] = SOURCE_ID
+
         try:
             resp = requests.get(url, headers=HEADERS_LOMADEE, params=params, timeout=20)
             if resp.ok:
@@ -70,12 +76,13 @@ def buscar_produtos_lomadee():
 
 
 def extrair_preco(prod: dict):
-    """Busca o preco do produto em todas as chaves possiveis da API da Lomadee."""
+    """Extrai qualquer valor numerico referente ao preço."""
     candidatos = [
         prod.get("price"),
         prod.get("priceTo"),
         prod.get("priceCurrent"),
         prod.get("priceFrom"),
+        prod.get("salePrice"),
         (prod.get("price") if isinstance(prod.get("price"), dict) else {}).get("value")
     ]
 
@@ -84,7 +91,6 @@ def extrair_preco(prod: dict):
             try:
                 val = float(c)
                 if val > 0:
-                    # Se vier em centavos inteiros acima de 50.000 sem decimal
                     if val > 50000 and val % 1 == 0:
                         val = val / 100.0
                     return val
@@ -94,12 +100,13 @@ def extrair_preco(prod: dict):
 
 
 def extrair_link(prod: dict):
-    """Busca a URL original do produto em todas as chaves possiveis."""
+    """Extrai a URL do produto ou link de afiliado."""
     candidatos = [
         prod.get("link"),
         prod.get("url"),
         prod.get("affiliateLink"),
-        prod.get("productUrl")
+        prod.get("productUrl"),
+        prod.get("shortUrl")
     ]
 
     for c in candidatos:
@@ -109,7 +116,7 @@ def extrair_link(prod: dict):
 
 
 def extrair_imagem(prod: dict):
-    """Busca a imagem em todas as estruturas de dados retornadas."""
+    """Extrai a URL da imagem do produto."""
     candidatos = [
         prod.get("image"),
         prod.get("imageUrl"),
@@ -193,6 +200,9 @@ def main():
     ignorados_sem_imagem = 0
 
     print(f"[debug] Total de {len(produtos)} produtos unicos obtidos.")
+    
+    if produtos:
+        print(f"[debug] Estrutura do primeiro produto obtido:\n{json.dumps(produtos[0], indent=2, ensure_ascii=False)}")
 
     for prod in produtos:
         if postados_agora >= MAX_POSTS_POR_EXECUCAO:
