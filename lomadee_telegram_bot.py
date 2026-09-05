@@ -1,6 +1,6 @@
 """
 Bot de Ofertas Lomadee -> Telegram
-Busca ofertas ativas na Lomadee e envia para o Telegram.
+Busca produtos da API de afiliados da Lomadee e publica no Telegram.
 """
 
 import os
@@ -24,12 +24,6 @@ HEADERS_LOMADEE = {
     "Content-Type": "application/json"
 }
 
-# Palavras-chave de busca abrangentes
-CATEGORIAS_AMPLAS = [
-    "smartphone", "tv", "notebook", "fone", "geladeira", 
-    "air fryer", "smartwatch", "ferramentas", "gamer", "cafeteira"
-]
-
 
 def carregar_historico() -> set:
     if not os.path.exists(ARQUIVO_HISTORICO):
@@ -51,25 +45,24 @@ def buscar_produtos_lomadee():
     ids_vistos = set()
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
 
-    for termo in CATEGORIAS_AMPLAS:
+    # Percorre varias paginas para obter produtos diversos sem usar o parametro 'keyword'
+    for pagina in range(1, 11):
         params = {
-            "page": 1,
-            "limit": 30,
-            "keyword": termo
+            "page": pagina,
+            "limit": 100
         }
         try:
             resp = requests.get(url, headers=HEADERS_LOMADEE, params=params, timeout=20)
             if not resp.ok:
-                print(f"[aviso] Erro HTTP {resp.status_code} para '{termo}': {resp.text}")
+                print(f"[aviso] Erro HTTP {resp.status_code} na pagina {pagina}: {resp.text}")
                 continue
 
             data = resp.json()
-            # Trata respostas em lista ou dicionario
             itens = data.get("data", []) if isinstance(data, dict) else data
             if not isinstance(itens, list):
                 itens = []
 
-            print(f"[debug] '{termo}': {len(itens)} produtos retornados")
+            print(f"[debug] Pagina {pagina}: {len(itens)} produtos retornados")
 
             for item in itens:
                 item_id = str(item.get("id") or item.get("productId") or "")
@@ -77,7 +70,7 @@ def buscar_produtos_lomadee():
                     ids_vistos.add(item_id)
                     produtos.append(item)
         except Exception as e:
-            print(f"[aviso] erro ao buscar termo '{termo}': {e}")
+            print(f"[aviso] Erro ao buscar pagina {pagina}: {e}")
 
     return produtos
 
