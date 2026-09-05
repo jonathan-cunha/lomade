@@ -1,6 +1,6 @@
 """
 Bot de Ofertas Lomadee -> Telegram
-Injeta sourceId para garantir o retorno de links e preços válidos.
+Extrai preços de dentro das estruturas 'pricing' e 'options' da API v2.
 """
 
 import os
@@ -48,10 +48,7 @@ def buscar_produtos_lomadee():
 
     paginas_sorteadas = random.sample(range(1, 100), 10)
     for pagina in paginas_sorteadas:
-        params = {
-            "page": pagina,
-            "limit": 100
-        }
+        params = {"page": pagina, "limit": 100}
         if SOURCE_ID:
             params["sourceId"] = SOURCE_ID
             params["siteId"] = SOURCE_ID
@@ -76,15 +73,34 @@ def buscar_produtos_lomadee():
 
 
 def extrair_preco(prod: dict):
-    """Extrai qualquer valor numerico referente ao preço."""
-    candidatos = [
+    """Extrai o preço das listas 'pricing' ou 'options' ou do nivel raiz."""
+    candidatos = []
+
+    # 1. Busca em 'pricing' (estrutura padrao observada no log)
+    pricing = prod.get("pricing")
+    if isinstance(pricing, list) and pricing:
+        for p in pricing:
+            if isinstance(p, dict):
+                candidatos.extend([p.get("price"), p.get("listPrice")])
+
+    # 2. Busca dentro de 'options'
+    options = prod.get("options")
+    if isinstance(options, list) and options:
+        for opt in options:
+            if isinstance(opt, dict):
+                opt_pricing = opt.get("pricing")
+                if isinstance(opt_pricing, list):
+                    for p in opt_pricing:
+                        if isinstance(p, dict):
+                            candidatos.extend([p.get("price"), p.get("listPrice")])
+
+    # 3. Busca no nivel raiz
+    candidatos.extend([
         prod.get("price"),
         prod.get("priceTo"),
         prod.get("priceCurrent"),
-        prod.get("priceFrom"),
-        prod.get("salePrice"),
-        (prod.get("price") if isinstance(prod.get("price"), dict) else {}).get("value")
-    ]
+        prod.get("salePrice")
+    ])
 
     for c in candidatos:
         if c is not None:
@@ -100,10 +116,10 @@ def extrair_preco(prod: dict):
 
 
 def extrair_link(prod: dict):
-    """Extrai a URL do produto ou link de afiliado."""
+    """Extrai a URL original do produto ou link de afiliado."""
     candidatos = [
-        prod.get("link"),
         prod.get("url"),
+        prod.get("link"),
         prod.get("affiliateLink"),
         prod.get("productUrl"),
         prod.get("shortUrl")
@@ -117,19 +133,36 @@ def extrair_link(prod: dict):
 
 def extrair_imagem(prod: dict):
     """Extrai a URL da imagem do produto."""
-    candidatos = [
+    candidatos = []
+
+    # Busca em 'images' da raiz
+    images = prod.get("images")
+    if isinstance(images, list) and images:
+        for img in images:
+            if isinstance(img, dict):
+                candidatos.append(img.get("url") or img.get("link"))
+            elif isinstance(img, str):
+                candidatos.append(img)
+
+    # Busca em 'options'
+    options = prod.get("options")
+    if isinstance(options, list) and options:
+        for opt in options:
+            if isinstance(opt, dict):
+                opt_imgs = opt.get("images")
+                if isinstance(opt_imgs, list):
+                    for img in opt_imgs:
+                        if isinstance(img, dict):
+                            candidatos.append(img.get("url"))
+                        elif isinstance(img, str):
+                            candidatos.append(img)
+
+    # Busca no nivel raiz
+    candidatos.extend([
         prod.get("image"),
         prod.get("imageUrl"),
         prod.get("thumbnail")
-    ]
-
-    imagens = prod.get("images")
-    if isinstance(imagens, list) and imagens:
-        primeira = imagens[0]
-        if isinstance(primeira, dict):
-            candidatos.insert(0, primeira.get("url") or primeira.get("link"))
-        elif isinstance(primeira, str):
-            candidatos.insert(0, primeira)
+    ])
 
     for c in candidatos:
         if c and isinstance(c, str) and c.startswith("http"):
@@ -196,13 +229,11 @@ def main():
     
     postados_agora = 0
     ignorados_historico = 0
+    ignorados_indisponiveis = 0
     ignorados_sem_preco = 0
     ignorados_sem_imagem = 0
 
     print(f"[debug] Total de {len(produtos)} produtos unicos obtidos.")
-    
-    if produtos:
-        print(f"[debug] Estrutura do primeiro produto obtido:\n{json.dumps(produtos[0], indent=2, ensure_ascii=False)}")
 
     for prod in produtos:
         if postados_agora >= MAX_POSTS_POR_EXECUCAO:
@@ -211,6 +242,11 @@ def main():
         prod_id = str(prod.get("id") or prod.get("productId") or "")
         if not prod_id or prod_id in historico:
             ignorados_historico += 1
+            continue
+
+        # Filtra produtos indisponiveis
+        if prod.get("available") is False:
+            ignorados_indisponiveis += 1
             continue
 
         preco = extrair_preco(prod)
@@ -249,6 +285,7 @@ def main():
     print("Resumo da execucao:")
     print(f" - Novas postagens: {postados_agora}")
     print(f" - Ignorados por historico: {ignorados_historico}")
+    print(f" - Ignorados por estar indisponivel: {ignorados_indisponiveis}")
     print(f" - Ignorados por falta de preco/link: {ignorados_sem_preco}")
     print(f" - Ignorados por falta de imagem: {ignorados_sem_imagem}")
 
