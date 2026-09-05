@@ -1,11 +1,12 @@
 """
 Bot de Ofertas Lomadee -> Telegram
-Busca produtos da API de afiliados da Lomadee e publica no Telegram.
+Busca produtos com paginacao aleatoria para garantir ofertas novas a cada execucao.
 """
 
 import os
 import json
 import time
+import random
 import requests
 
 # CONFIGURACOES
@@ -45,8 +46,11 @@ def buscar_produtos_lomadee():
     ids_vistos = set()
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
 
-    # Percorre varias paginas para obter produtos diversos sem usar o parametro 'keyword'
-    for pagina in range(1, 11):
+    # Seleciona 10 paginas aleatorias do intervalo de 1 a 50 para variacao constante
+    paginas_sorteadas = random.sample(range(1, 51), 10)
+    print(f"[debug] Paginas sorteadas para esta execucao: {paginas_sorteadas}")
+
+    for pagina in paginas_sorteadas:
         params = {
             "page": pagina,
             "limit": 100
@@ -72,6 +76,8 @@ def buscar_produtos_lomadee():
         except Exception as e:
             print(f"[aviso] Erro ao buscar pagina {pagina}: {e}")
 
+    # Embaralha os produtos para evitar postar sempre na mesma ordem
+    random.shuffle(produtos)
     return produtos
 
 
