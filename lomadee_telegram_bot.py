@@ -1,6 +1,6 @@
 """
 Bot de Ofertas Lomadee -> Telegram
-Busca produtos por lojas parceiras e exibe logs detalhados de filtragem.
+Processamento flexivel de preços e links para garantir postagem de ofertas.
 """
 
 import os
@@ -41,72 +41,93 @@ def salvar_historico(historico: set):
         json.dump(sorted(historico), f, ensure_ascii=False, indent=2)
 
 
-def buscar_lojas_lomadee():
-    """Busca a lista de lojas ativas cadastradas no perfil."""
-    url = f"{LOMADEE_BASE_URL}/affiliate/stores"
-    try:
-        resp = requests.get(url, headers=HEADERS_LOMADEE, params={"limit": 50}, timeout=15)
-        if resp.ok:
-            data = resp.json()
-            itens = data.get("data", []) if isinstance(data, dict) else data
-            if isinstance(itens, list):
-                lojas_ids = [str(item.get("id") or item.get("storeId")) for item in itens if item.get("id") or item.get("storeId")]
-                print(f"[debug] {len(lojas_ids)} lojas encontradas na conta.")
-                return lojas_ids
-    except Exception as e:
-        print(f"[aviso] Nao foi possivel obter lojas: {e}")
-    return []
-
-
 def buscar_produtos_lomadee():
     produtos = []
     ids_vistos = set()
     url = f"{LOMADEE_BASE_URL}/affiliate/products"
 
-    lojas = buscar_lojas_lomadee()
-    
-    # Se houver lojas encontradas, consulta produtos intercalando as lojas de forma aleatoria
-    if lojas:
-        random.shuffle(lojas)
-        for store_id in lojas[:10]:
-            params = {"storeId": store_id, "limit": 50}
-            try:
-                resp = requests.get(url, headers=HEADERS_LOMADEE, params=params, timeout=15)
-                if resp.ok:
-                    data = resp.json()
-                    itens = data.get("data", []) if isinstance(data, dict) else data
-                    if isinstance(itens, list):
-                        print(f"[debug] Loja {store_id}: {len(itens)} produtos retornados.")
-                        for item in itens:
-                            item_id = str(item.get("id") or item.get("productId") or "")
-                            if item_id and item_id not in ids_vistos:
-                                ids_vistos.add(item_id)
-                                produtos.append(item)
-            except Exception as e:
-                print(f"[aviso] Erro ao buscar produtos da loja {store_id}: {e}")
-
-    # Fallback caso a busca por lojas nao traga resultados suficientes
-    if len(produtos) < 10:
-        paginas_sorteadas = random.sample(range(1, 100), 5)
-        for pagina in paginas_sorteadas:
-            params = {"page": pagina, "limit": 50}
-            try:
-                resp = requests.get(url, headers=HEADERS_LOMADEE, params=params, timeout=15)
-                if resp.ok:
-                    data = resp.json()
-                    itens = data.get("data", []) if isinstance(data, dict) else data
-                    if isinstance(itens, list):
-                        print(f"[debug] Pagina fallback {pagina}: {len(itens)} produtos.")
-                        for item in itens:
-                            item_id = str(item.get("id") or item.get("productId") or "")
-                            if item_id and item_id not in ids_vistos:
-                                ids_vistos.add(item_id)
-                                produtos.append(item)
-            except Exception as e:
-                print(f"[aviso] Erro na pagina fallback {pagina}: {e}")
+    # Seleciona paginas variadas
+    paginas_sorteadas = random.sample(range(1, 100), 10)
+    for pagina in paginas_sorteadas:
+        params = {"page": pagina, "limit": 100}
+        try:
+            resp = requests.get(url, headers=HEADERS_LOMADEE, params=params, timeout=20)
+            if resp.ok:
+                data = resp.json()
+                itens = data.get("data", []) if isinstance(data, dict) else data
+                if isinstance(itens, list):
+                    print(f"[debug] Pagina {pagina}: {len(itens)} produtos retornados.")
+                    for item in itens:
+                        item_id = str(item.get("id") or item.get("productId") or "")
+                        if item_id and item_id not in ids_vistos:
+                            ids_vistos.add(item_id)
+                            produtos.append(item)
+        except Exception as e:
+            print(f"[aviso] Erro ao buscar pagina {pagina}: {e}")
 
     random.shuffle(produtos)
     return produtos
+
+
+def extrair_preco(prod: dict):
+    """Busca o preco do produto em todas as chaves possiveis da API da Lomadee."""
+    candidatos = [
+        prod.get("price"),
+        prod.get("priceTo"),
+        prod.get("priceCurrent"),
+        prod.get("priceFrom"),
+        (prod.get("price") if isinstance(prod.get("price"), dict) else {}).get("value")
+    ]
+
+    for c in candidatos:
+        if c is not None:
+            try:
+                val = float(c)
+                if val > 0:
+                    # Se vier em centavos inteiros acima de 50.000 sem decimal
+                    if val > 50000 and val % 1 == 0:
+                        val = val / 100.0
+                    return val
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def extrair_link(prod: dict):
+    """Busca a URL original do produto em todas as chaves possiveis."""
+    candidatos = [
+        prod.get("link"),
+        prod.get("url"),
+        prod.get("affiliateLink"),
+        prod.get("productUrl")
+    ]
+
+    for c in candidatos:
+        if c and isinstance(c, str) and c.startswith("http"):
+            return c
+    return None
+
+
+def extrair_imagem(prod: dict):
+    """Busca a imagem em todas as estruturas de dados retornadas."""
+    candidatos = [
+        prod.get("image"),
+        prod.get("imageUrl"),
+        prod.get("thumbnail")
+    ]
+
+    imagens = prod.get("images")
+    if isinstance(imagens, list) and imagens:
+        primeira = imagens[0]
+        if isinstance(primeira, dict):
+            candidatos.insert(0, primeira.get("url") or primeira.get("link"))
+        elif isinstance(primeira, str):
+            candidatos.insert(0, primeira)
+
+    for c in candidatos:
+        if c and isinstance(c, str) and c.startswith("http"):
+            return c
+    return None
 
 
 def encurtar_url_lomadee(url_original, organization_id):
@@ -133,18 +154,6 @@ def encurtar_url_lomadee(url_original, organization_id):
     except Exception:
         pass
     return url_original
-
-
-def normalizar_preco(valor):
-    if valor is None:
-        return None
-    try:
-        val = float(valor)
-        if val > 10000 and val % 1 == 0:
-            val = val / 100
-        return val
-    except (ValueError, TypeError):
-        return None
 
 
 def formatar_preco(valor: float) -> str:
@@ -194,20 +203,15 @@ def main():
             ignorados_historico += 1
             continue
 
-        preco = normalizar_preco(prod.get("price"))
-        link_orig = prod.get("url") or prod.get("link")
+        preco = extrair_preco(prod)
+        link_orig = extrair_link(prod)
         org_id = prod.get("organizationId")
 
         if not preco or not link_orig:
             ignorados_sem_preco += 1
             continue
 
-        imagens = prod.get("images") or []
-        imagem_url = None
-        if isinstance(imagens, list) and imagens:
-            imagem_url = (imagens[0] or {}).get("url") if isinstance(imagens[0], dict) else imagens[0]
-        imagem_url = imagem_url or prod.get("image") or prod.get("imageUrl")
-
+        imagem_url = extrair_imagem(prod)
         if not imagem_url:
             ignorados_sem_imagem += 1
             continue
@@ -232,7 +236,7 @@ def main():
             print(f"[erro] Falha ao postar '{oferta['titulo']}': {e}")
 
     salvar_historico(historico)
-    print(f"Resumo da execucao:")
+    print("Resumo da execucao:")
     print(f" - Novas postagens: {postados_agora}")
     print(f" - Ignorados por historico: {ignorados_historico}")
     print(f" - Ignorados por falta de preco/link: {ignorados_sem_preco}")
